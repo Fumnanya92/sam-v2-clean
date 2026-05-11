@@ -1,4 +1,4 @@
-"""Structured config models for Sam v2."""
+"""Structured config models for Sam."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RUNTIME_DIR = REPO_ROOT / "sam_v2" / "workspace" / "runtime"
+DEFAULT_RUNTIME_DIR = REPO_ROOT / "workspace" / "runtime"
 
 
 @dataclass
