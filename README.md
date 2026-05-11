@@ -1,6 +1,6 @@
-# Sam v2
+# Sam
 
-Sam v2 is a clean rebuild of Sam, my personal AI assistant.
+Sam is my personal AI assistant.
 
 The vision is to build a practical assistant that can help with real tasks on my computer, support my development workflow, and grow into a reliable system I can use every day.
 
@@ -8,7 +8,7 @@ Sam should feel simple to use, easy to improve, and safe enough to trust with im
 
 ## Vision
 
-Sam v2 is being built to:
+Sam is being built to:
 
 - understand what I want to do
 - help plan and complete tasks
@@ -70,7 +70,7 @@ python -m sam_v2 --native-ui
 
 ## Project Direction
 
-Sam v2 will grow step by step.
+Sam will grow step by step.
 
 The idea is to keep the system understandable while still making it powerful. Each major feature should be easy to test, easy to debug, and easy to improve later.
 
@@ -89,6 +89,6 @@ Planned areas include:
 
 ## Repository Status
 
-This repository is now the main workspace for Sam v2.
+This repository is now the main workspace for Sam.
 
 The README will keep changing as the project grows.
