@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 
-LOG_ROOT = Path("sam_v2/logs")
+LOG_ROOT = Path("logs")
 LOG_SUBDIRS = ("actions", "errors", "runs", "summaries", "tests")
 
 
