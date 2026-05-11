@@ -1,4 +1,4 @@
-"""Runnable entrypoint for the Sam v2 application workspace."""
+"""Runnable entrypoint for the Sam application workspace."""
 
 from __future__ import annotations
 
@@ -9,18 +9,18 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from sam_v2.config import load_config
-from sam_v2.core import SamRuntime
-from sam_v2.daemon import create_app
-from sam_v2.diagnostics import reset_log_workspace
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.native_ui import run_native_ui
+from sam.config import load_config
+from sam.core import SamRuntime
+from sam.daemon import create_app
+from sam.diagnostics import reset_log_workspace
+from sam.diagnostics.result import SamResult
+from sam.native_ui import run_native_ui
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run Sam v2 from the clean rebuild workspace.")
-    parser.add_argument("--config", dest="config_path", default=None, help="Path to the Sam v2 YAML config file.")
-    parser.add_argument("--env-file", dest="env_file", default=None, help="Optional .env file for Sam v2.")
+    parser = argparse.ArgumentParser(description="Run Sam from the application workspace.")
+    parser.add_argument("--config", dest="config_path", default=None, help="Path to the Sam YAML config file.")
+    parser.add_argument("--env-file", dest="env_file", default=None, help="Optional .env file for Sam.")
     parser.add_argument(
         "--data-dir",
         dest="data_dir",
@@ -88,7 +88,7 @@ def _run_once(runtime: SamRuntime, text: str, *, json_output: bool) -> int:
 
 
 def _run_repl(runtime: SamRuntime) -> int:
-    print("Sam v2 REPL. Type 'exit' or 'quit' to stop.")
+    print("Sam REPL. Type 'exit' or 'quit' to stop.")
     while True:
         try:
             user_text = input("sam> ").strip()
