@@ -21,6 +21,13 @@ class ToolExecutor:
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolDefinition] = {}
+        self._aliases: dict[str, str] = {
+            "inspect_repo": "inspect_project_repo",
+            "inspect_repository": "inspect_project_repo",
+            "repo_status": "inspect_project_repo",
+            "git_status": "inspect_git_state",
+            "check_git_status": "inspect_git_state",
+        }
 
     def register(
         self,
@@ -40,7 +47,8 @@ class ToolExecutor:
         )
 
     def execute(self, tool_name: str, payload: dict[str, Any] | None = None) -> SamResult:
-        if tool_name not in self._tools:
+        resolved_tool_name = self.resolve_tool_name(tool_name)
+        if resolved_tool_name not in self._tools:
             return SamResult(
                 status="failed",
                 summary="Tool is not registered.",
@@ -50,25 +58,32 @@ class ToolExecutor:
                 metadata={"tool": tool_name},
             )
 
-        definition = self._tools[tool_name]
+        definition = self._tools[resolved_tool_name]
         result = definition.handler(payload or {})
         if isinstance(result, SamResult):
-            result.metadata.setdefault("tool", tool_name)
+            result.metadata.setdefault("tool", resolved_tool_name)
+            if resolved_tool_name != tool_name:
+                result.metadata.setdefault("requested_tool", tool_name)
             return result
 
         return SamResult(
             status="success",
             summary=str(result) if result is not None else "Tool executed successfully.",
             next_action="stop",
-            metadata={"tool": tool_name, "result": result},
+            metadata={"tool": resolved_tool_name, "requested_tool": tool_name, "result": result},
         )
 
+    def resolve_tool_name(self, tool_name: str) -> str:
+        if tool_name in self._tools:
+            return tool_name
+        return self._aliases.get(tool_name, tool_name)
+
     def get(self, tool_name: str) -> ToolDefinition | None:
-        return self._tools.get(tool_name)
+        return self._tools.get(self.resolve_tool_name(tool_name))
 
     @property
     def available_tools(self) -> list[str]:
-        return sorted(self._tools.keys())
+        return sorted(set(self._tools.keys()) | set(self._aliases.keys()))
 
     def list_metadata(self) -> list[dict[str, Any]]:
         return [
