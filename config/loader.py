@@ -1,4 +1,4 @@
-"""Config loader for Sam v2."""
+"""Config loader for Sam."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
 
 from .models import (
     ChannelConfig,
@@ -25,8 +25,8 @@ from .models import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "sam.yaml"
-DEFAULT_RUNTIME_DIR = REPO_ROOT / "sam_v2" / "workspace" / "runtime"
-ENV_PREFIXES = ("SAM_V2__", "SAM__")
+DEFAULT_RUNTIME_DIR = REPO_ROOT / "workspace" / "runtime"
+ENV_PREFIXES = ("SAM__",)
 
 
 def load_config(
@@ -34,7 +34,7 @@ def load_config(
     config_path: str | Path | None = None,
     env_file: str | Path | None = None,
 ) -> tuple[SamResult, SamConfig | None]:
-    """Load Sam v2 config from YAML plus env overrides."""
+    """Load Sam config from YAML plus env overrides."""
     try:
         resolved_config_path = _resolve_config_path(config_path)
         resolved_env_file = Path(env_file) if env_file is not None else REPO_ROOT / ".env"
@@ -48,7 +48,7 @@ def load_config(
         return (
             SamResult(
                 status="success",
-                summary="Sam v2 config loaded.",
+                summary="Sam config loaded.",
                 next_action="stop",
                 metadata={
                     "config_path": str(resolved_config_path),
@@ -61,7 +61,7 @@ def load_config(
         return (
             SamResult(
                 status="failed",
-                summary="Sam v2 config file was not found.",
+                summary="Sam config file was not found.",
                 error_type=ErrorType.FILE_ACCESS_ERROR,
                 error_message=str(exc),
                 next_action="ask_user",
@@ -72,7 +72,7 @@ def load_config(
         return (
             SamResult(
                 status="failed",
-                summary="Sam v2 config file is invalid YAML.",
+                summary="Sam config file is invalid YAML.",
                 error_type=ErrorType.FILE_ACCESS_ERROR,
                 error_message=str(exc),
                 next_action="ask_user",
@@ -83,7 +83,7 @@ def load_config(
         return (
             SamResult(
                 status="failed",
-                summary="Sam v2 config content is invalid.",
+                summary="Sam config content is invalid.",
                 error_type=ErrorType.FILE_ACCESS_ERROR,
                 error_message=str(exc),
                 next_action="ask_user",
@@ -94,7 +94,7 @@ def load_config(
         return (
             SamResult(
                 status="failed",
-                summary="Sam v2 config could not be read.",
+                summary="Sam config could not be read.",
                 error_type=ErrorType.FILE_ACCESS_ERROR,
                 error_message=str(exc),
                 next_action="retry",
@@ -117,7 +117,7 @@ def load_config_or_raise(
 def _resolve_config_path(config_path: str | Path | None) -> Path:
     if config_path is not None:
         return Path(config_path)
-    override = os.getenv("SAM_V2_CONFIG_PATH")
+    override = os.getenv("SAM_CONFIG_PATH")
     if override:
         return Path(override)
     return DEFAULT_CONFIG_PATH
