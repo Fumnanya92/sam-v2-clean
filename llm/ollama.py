@@ -1,4 +1,4 @@
-"""Minimal Ollama client for Sam understanding tasks."""
+"""Minimal Ollama client for Sam understanding and code generation tasks."""
 
 from __future__ import annotations
 
@@ -28,6 +28,21 @@ class OllamaIntentOutput:
     confidence: str = "low"
     model: str = ""
     source: str = "ollama"
+
+
+@dataclass
+class GeneratedProjectFile:
+    path: str
+    content: str
+
+
+@dataclass
+class GeneratedProject:
+    summary: str
+    stack: str
+    files: list[GeneratedProjectFile]
+    run_command: list[str] = field(default_factory=list)
+    test_command: list[str] = field(default_factory=list)
 
 
 class OllamaClient:
@@ -146,12 +161,7 @@ class OllamaClient:
                 'Return fields: intent, parameters, needs_clarification, clarification_question, response_text, confidence.',
             ]
         )
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-        }
+        payload = {"model": model, "prompt": prompt, "stream": False, "format": "json"}
         response = self._request("POST", "/api/generate", payload)
         raw_body = str(response.get("response", "")).strip()
         parsed = self._parse_json_object(raw_body)
@@ -166,6 +176,57 @@ class OllamaClient:
             response_text=str(parsed.get("response_text", "") or ""),
             confidence=str(parsed.get("confidence", "low") or "low"),
             model=model,
+        )
+
+    def generate_project(self, *, project_name: str, project_type: str, user_request: str) -> GeneratedProject:
+        model = self.resolve_model()
+        prompt = "\n".join(
+            [
+                "You are Sam's coding worker.",
+                "Generate a small, runnable project from the user's request.",
+                "Return JSON only. Do not include markdown fences.",
+                "Do not use hardcoded examples unless the user asks for that exact thing.",
+                "Prefer simple, dependency-free code unless the user asks for a framework.",
+                "For a browser project, create index.html, styles.css, app.js, README.md, and run_project.py.",
+                "run_project.py must validate the project and open the main file in the browser when run.",
+                "The JSON shape must be:",
+                '{"summary":"...","stack":"...","run_command":["python","run_project.py"],"test_command":["python","run_project.py","--check"],"files":[{"path":"index.html","content":"..."}]}',
+                "Never use absolute paths. Never write outside the project folder.",
+                f"Project name: {project_name}",
+                f"Project type: {project_type}",
+                f"User request: {user_request}",
+            ]
+        )
+        payload = {"model": model, "prompt": prompt, "stream": False, "format": "json"}
+        response = self._request("POST", "/api/generate", payload)
+        raw_body = str(response.get("response", "")).strip()
+        parsed = self._parse_json_object(raw_body)
+        if not isinstance(parsed, dict):
+            raise ValueError("Ollama project generation response was not valid JSON.")
+
+        files_raw = parsed.get("files", [])
+        if not isinstance(files_raw, list) or not files_raw:
+            raise ValueError("Ollama project generation did not return files.")
+
+        files: list[GeneratedProjectFile] = []
+        for item in files_raw:
+            if not isinstance(item, dict):
+                continue
+            file_path = str(item.get("path", "")).strip().replace("\\", "/")
+            content = str(item.get("content", ""))
+            if not file_path or file_path.startswith("/") or ".." in Path(file_path).parts:
+                raise ValueError(f"Unsafe generated file path: {file_path}")
+            files.append(GeneratedProjectFile(path=file_path, content=content))
+
+        if not files:
+            raise ValueError("Ollama project generation returned no usable files.")
+
+        return GeneratedProject(
+            summary=str(parsed.get("summary", "Project generated.") or "Project generated."),
+            stack=str(parsed.get("stack", project_type) or project_type),
+            run_command=self._string_list(parsed.get("run_command")) or ["python", "run_project.py"],
+            test_command=self._string_list(parsed.get("test_command")) or ["python", "run_project.py", "--check"],
+            files=files,
         )
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -217,3 +278,9 @@ class OllamaClient:
                 return json.loads(cleaned[start:end])
             except json.JSONDecodeError:
                 return None
+
+    @staticmethod
+    def _string_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if str(item).strip()]
