@@ -1,0 +1,1 @@
+{"timestamp": "2026-05-09T07:41:23.647061", "scope": "sam_v2.core.request", "event": "request_completed_non_success", "error_type": "missing_permission", "error_message": "git push requires approval", "metadata": {"intent": "push_changes"}}
