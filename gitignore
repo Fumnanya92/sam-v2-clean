@@ -1,0 +1,78 @@
+# Sensitive files
+.env
+.venv/
+config/api_keys.json
+memory/memory.json
+memory/test_credentials.json
+backup/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs and debug
+*.log
+log/
+debug/
+
+# Coverage / cache
+.coverage
+.coverage.*
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Claude Code working directory
+.claude/
+tmpclaude-*
+
+# Playwright session data (browser cookies, auth sessions)
+.playwright-cli/
+
+# Runtime / session data
+sam_session.log
+memory/patterns.json
+memory/session_state.json
+memory/memory.json
+memory/flutter_state.json
+
+# Large binary assets
+backup/vosk-model.zip
+
+# Node
+node_modules/
+ui/dist/
+ui/.vite/
+
+# Generated runtime reports
+reports/
+sam_v2/logs/
+sam_v2/tests_live/.tmp/
+sam_v2/workspace/
+
+# Root-level junk
+null
