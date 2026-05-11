@@ -23,8 +23,8 @@ from .models import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "sam.yaml"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG_PATH = REPO_ROOT / "sam.yaml"
 DEFAULT_RUNTIME_DIR = REPO_ROOT / "workspace" / "runtime"
 ENV_PREFIXES = ("SAM__",)
 

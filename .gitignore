@@ -70,9 +70,8 @@ ui/.vite/
 
 # Generated runtime reports
 reports/
+logs/
 sam_v2/logs/
 sam_v2/tests_live/.tmp/
 sam_v2/workspace/
-
-# Root-level junk
-null
+workspace/
