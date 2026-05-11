@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -32,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--daemon", dest="daemon_mode", action="store_true", help="Run the FastAPI daemon.")
     parser.add_argument("--cli", dest="cli_mode", action="store_true", help="Run the terminal REPL instead of the native UI.")
     parser.add_argument("--native-ui", dest="native_ui_mode", action="store_true", help="Run the native Sam desktop shell.")
+    parser.add_argument("--reset-runtime", dest="reset_runtime", action="store_true", help="Delete runtime state, database, memory, session, project registry, upgrade registry, and logs.")
     parser.add_argument("--host", default="127.0.0.1", help="Host for daemon mode.")
     parser.add_argument("--port", type=int, default=0, help="Port override for daemon mode.")
     return parser
@@ -49,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
     data_dir = _resolve_data_dir(config.daemon.data_dir, args.data_dir)
     db_path = Path(args.data_dir).expanduser() / "sam.db" if args.data_dir else config.daemon.db_path
     db_path = Path(db_path).expanduser()
+
+    if args.reset_runtime:
+        _reset_runtime_state(data_dir=data_dir, db_path=db_path)
+        print("Sam runtime state has been reset.")
+        return 0
+
     data_dir.mkdir(parents=True, exist_ok=True)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     reset_log_workspace()
@@ -74,6 +82,29 @@ def main(argv: list[str] | None = None) -> int:
         return _run_repl(runtime)
     finally:
         runtime.shutdown()
+
+
+def _reset_runtime_state(*, data_dir: Path, db_path: Path) -> None:
+    targets = [
+        db_path,
+        db_path.with_suffix(db_path.suffix + "-wal"),
+        db_path.with_suffix(db_path.suffix + "-shm"),
+        data_dir / "memory.json",
+        data_dir / "session.json",
+        db_path.with_name("projects.json"),
+        db_path.with_name("upgrades.json"),
+    ]
+
+    for target in targets:
+        if target.exists() and target.is_file():
+            target.unlink()
+
+    projects_dir = data_dir.parent / "projects"
+    if projects_dir.exists() and projects_dir.is_dir():
+        shutil.rmtree(projects_dir, ignore_errors=True)
+
+    reset_log_workspace()
+    data_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _run_once(runtime: SamRuntime, text: str, *, json_output: bool) -> int:
