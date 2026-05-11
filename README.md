@@ -1,62 +1,131 @@
-# Sam v2
+# Sam v2 Clean
 
-Sam v2 is the clean rebuild workspace for Sam.
+Sam v2 Clean is the new working home for Sam.
 
-Old Sam files remain in the repository only as reference material while features are migrated one by one.
+The goal is not to dump every old feature back into the assistant. The goal is to rebuild Sam into a stable, testable, Python-first assistant that can grow without breaking itself.
 
-## Current Goal
+## What Sam Should Be
 
-Build Sam as an autonomous assistant operating system that can:
+Sam is a personal AI assistant built to help with real work:
 
-- understand user goals
-- plan tasks
-- use controlled tools/workers
-- run live tests
-- catch and report its own errors
+- understand a user request
+- decide the safest next action
+- use local tools where possible
+- call an LLM only when needed
+- keep logs of what happened
+- report errors clearly
 - ask for approval before sensitive actions
-- keep logs of everything it does
+- support CLI, daemon, and desktop UI modes
 
-## First Foundation
+## Current Direction
 
-This first version focuses on:
+This repo is now the source of truth for Sam v2.
 
-- structured results
-- error categories
-- run logging
-- migration tracking
-- live testing rules
-- local assistant access model
+Old Sam files may exist in the repository as reference material, but they are not automatically trusted. A feature is only considered part of Sam v2 when it has been moved into the clean `sam_v2/` structure, tested, and documented.
 
-No old feature is considered migrated until it is rebuilt or safely copied into `sam_v2/`, live tested, and marked in the tracker.
+## Core Rules
 
-## Run Sam v2
+1. Keep it Python-first.
+2. Keep it code-first before LLM-first.
+3. Do not add ten features at once.
+4. Migrate one feature, test it, then move to the next.
+5. Every tool should return a structured result.
+6. Every failure should be logged clearly.
+7. Sensitive actions must require approval.
+8. No feature is complete until it runs live.
 
-Native desktop shell:
+## Planned Runtime Modes
+
+Sam v2 should support these modes:
+
+### Native desktop shell
 
 ```bash
 python -m sam_v2
 ```
 
-One-shot request:
+### One-shot command
 
 ```bash
 python -m sam_v2 --once "what can you do"
 ```
 
-Interactive REPL:
+### CLI mode
 
 ```bash
 python -m sam_v2 --cli
 ```
 
-Daemon mode:
+### Daemon/API mode
 
 ```bash
 python -m sam_v2 --daemon
 ```
 
-You can still launch the native shell explicitly with:
+### Explicit native UI mode
 
 ```bash
 python -m sam_v2 --native-ui
 ```
+
+## Current Status
+
+Sam v2 is in rebuild mode.
+
+The first milestone is to make the foundation work reliably:
+
+- package entrypoint
+- config loading
+- runtime core
+- structured result system
+- logging
+- CLI mode
+- one-shot mode
+- daemon health endpoint
+- basic tests
+
+After that, features can be migrated one by one.
+
+## Suggested Clean Structure
+
+```text
+sam_v2/
+  __init__.py
+  __main__.py
+  config/
+  core/
+  daemon/
+  diagnostics/
+  memory/
+  tools/
+  native_ui/
+  tests/
+```
+
+Reference or old code should stay outside the clean runtime path until it is reviewed.
+
+## Migration Rule
+
+A migrated feature must have:
+
+- a clear purpose
+- a clean module location
+- no hidden dependency on old broken code
+- structured success/error output
+- a simple way to test it
+- a note in the migration tracker
+
+## Immediate Priority
+
+Do not start with multi-agent, WhatsApp, dashboard, or heavy automation.
+
+Start with the foundation:
+
+1. `python -m sam_v2 --once "what can you do"`
+2. `python -m sam_v2 --cli`
+3. `python -m sam_v2 --daemon`
+4. health endpoint
+5. logging
+6. simple tool execution
+
+Once these work, Sam can grow safely.
