@@ -9,12 +9,12 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from sam.config import load_config
-from sam.core import SamRuntime
-from sam.daemon import create_app
-from sam.diagnostics import reset_log_workspace
-from sam.diagnostics.result import SamResult
-from sam.native_ui import run_native_ui
+from config import load_config
+from core import SamRuntime
+from daemon import create_app
+from diagnostics import reset_log_workspace
+from diagnostics.result import SamResult
+from native_ui import run_native_ui
 
 
 def build_parser() -> argparse.ArgumentParser:
