@@ -75,3 +75,7 @@ sam_v2/logs/
 sam_v2/tests_live/.tmp/
 sam_v2/workspace/
 workspace/
+
+# Sam config (local)
+sam.yaml
+
