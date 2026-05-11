@@ -145,7 +145,7 @@ class WorkerCentricExecutor:
             
             return SamResult(
                 status="failed",
-                summary=f"Tool execution failed: {self.tool_name}",
+                summary=f"Tool execution failed: {tool_name}",
                 error_type="EXECUTION_ERROR",
                 error_message=error_msg,
                 next_action="stop",
