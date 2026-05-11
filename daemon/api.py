@@ -1,4 +1,4 @@
-"""API routes for the minimal Sam v2 daemon skeleton."""
+"""API routes for the minimal Sam daemon skeleton."""
 
 from __future__ import annotations
 
@@ -10,10 +10,7 @@ from uuid import uuid4
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
-from storage.db import init_storage, log_audit_event
-from storage.models import AuditEvent
 
 from .ws import WebSocketHub
 
@@ -35,7 +32,7 @@ def build_router(
     async def health() -> dict:
         return {
             "status": "ok",
-            "service": "sam_v2_daemon",
+            "service": "sam_daemon",
             "queue_depth": chat_queue.qsize(),
             "websocket_clients": hub.client_count,
             "db_path": str(db_path),
@@ -54,19 +51,6 @@ def build_router(
             }
         )
 
-        audit_result, audit_id = log_audit_event(
-            db_path,
-            AuditEvent(
-                event_type="chat_received",
-                actor="daemon",
-                summary=body.message,
-                metadata_json=(
-                    '{"session_id":"%s","message_id":"%s"}'
-                    % (session_id, message_id)
-                ),
-            ),
-        )
-
         await hub.broadcast(
             {
                 "type": "chat_message",
@@ -80,15 +64,12 @@ def build_router(
         )
 
         result = SamResult(
-            status="success" if audit_result.ok else "partial",
+            status="success",
             summary="Chat accepted by daemon.",
-            error_type=None if audit_result.ok else ErrorType.FILE_ACCESS_ERROR,
-            error_message=None if audit_result.ok else audit_result.error_message,
-            next_action="stop" if audit_result.ok else "retry",
+            next_action="stop",
             metadata={
                 "message_id": message_id,
                 "queue_depth": chat_queue.qsize(),
-                "audit_id": audit_id,
             },
         )
         return result.__dict__
