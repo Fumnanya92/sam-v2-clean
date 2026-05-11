@@ -10,14 +10,14 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from sam_v2.config import load_config_or_raise
-from sam_v2.diagnostics.run_logger import RunLogger
-from sam_v2.storage.db import init_storage
+from config import load_config_or_raise
+from diagnostics.run_logger import RunLogger
+from storage.db import init_storage
 
 from .api import build_router
 from .ws import WebSocketHub
 
-logger = logging.getLogger("sam_v2.daemon")
+logger = logging.getLogger("daemon")
 
 
 def create_app_from_config(

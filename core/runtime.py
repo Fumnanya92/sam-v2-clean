@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sam_v2.approvals import ApprovalManager, AuthorityConfig, AuthorityEngine
-from sam_v2.capabilities import CapabilityRegistry
-from sam_v2.diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.diagnostics.run_logger import RunLogger
-from sam_v2.storage.db import init_storage
+from approvals import ApprovalManager, AuthorityConfig, AuthorityEngine
+from capabilities import CapabilityRegistry
+from diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
+from diagnostics.result import SamResult
+from diagnostics.run_logger import RunLogger
+from storage.db import init_storage
 
 from .request_handler import RequestHandler
 from .session import RuntimeSession
@@ -31,7 +31,7 @@ class SamRuntime:
         self.session_path = Path(session_path)
         self.run_logger = RunLogger("sam_v2 core runtime")
         self.action_logger = ActionLogger("sam_v2 core runtime", correlation_id=self.run_logger.run_id)
-        self.error_logger = ErrorLogger("sam_v2.core.runtime")
+        self.error_logger = ErrorLogger("core.runtime")
         self.summary_logger = SummaryLogger("sam_v2 core runtime", correlation_id=self.run_logger.run_id)
         self.session = RuntimeSession()
         self.approval_manager = ApprovalManager(self.db_path)

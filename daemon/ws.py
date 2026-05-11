@@ -8,7 +8,7 @@ from typing import Set
 
 from fastapi import WebSocket
 
-logger = logging.getLogger("sam_v2.daemon.ws")
+logger = logging.getLogger("daemon.ws")
 
 
 class WebSocketHub:

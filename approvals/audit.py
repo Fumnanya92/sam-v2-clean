@@ -9,9 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.storage.db import _connect
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
+from storage.db import _connect
 
 from .schema import CREATE_INDEXES, CREATE_TABLES
 

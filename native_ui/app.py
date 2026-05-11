@@ -10,10 +10,10 @@ from pathlib import Path
 from PyQt6.QtCore import QRect, QThread, QTimer, Qt
 from PyQt6.QtWidgets import QApplication
 
-from sam_v2.core import SamRuntime
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.memory.manager import load_memory
-from sam_v2.workers import worker_monitor
+from core import SamRuntime
+from diagnostics.result import SamResult
+from memory.manager import load_memory
+from workers import worker_monitor
 
 from .orb import OrbWindow
 from .windows import DashboardWindow, IdleSceneWindow, TaskPopupWindow

@@ -7,8 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
 
 
 @dataclass

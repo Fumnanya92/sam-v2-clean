@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from .log_manager import ensure_log_directories
 
-LOG_DIR = Path("sam_v2/logs/tests")
+LOG_DIR = Path("logs/tests")
 ensure_log_directories()
 
 

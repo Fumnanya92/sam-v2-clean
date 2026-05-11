@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib import request
 
-from sam_v2.config import load_config
+from config import load_config
 
 
 @dataclass

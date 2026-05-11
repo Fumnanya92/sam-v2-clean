@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.diagnostics.run_logger import RunLogger
-from sam_v2.workers import CommandSpec
+from diagnostics.error_types import ErrorType
+from diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
+from diagnostics.result import SamResult
+from diagnostics.run_logger import RunLogger
+from workers import CommandSpec
 
 from .workflow_bridge import ExecutionPlan, ExecutionStep, WorkflowBridge
 
@@ -61,7 +61,7 @@ class SupervisorController:
     def decide(self, request: SupervisorRequest) -> SamResult:
         run_logger = RunLogger("sam_v2 supervisor decision")
         action_logger = ActionLogger("sam_v2 supervisor decision", correlation_id=run_logger.run_id)
-        error_logger = ErrorLogger("sam_v2.supervisor.controller")
+        error_logger = ErrorLogger("supervisor.controller")
         summary_logger = SummaryLogger("sam_v2 supervisor decision", correlation_id=run_logger.run_id)
 
         run_logger.log("decision_started", {"goal": request.goal, "task_kind": request.task_kind})

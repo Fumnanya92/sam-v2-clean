@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sam_v2.diagnostics.result import SamResult
+from diagnostics.result import SamResult
 
 
 @dataclass

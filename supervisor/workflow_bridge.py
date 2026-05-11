@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from sam_v2.approvals import ApprovalManager, AuthorityEngine
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.diagnostics.run_logger import RunLogger
-from sam_v2.workers import CommandSpec, ToolingWorker, WorkerQueue
+from approvals import ApprovalManager, AuthorityEngine
+from diagnostics.error_types import ErrorType
+from diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
+from diagnostics.result import SamResult
+from diagnostics.run_logger import RunLogger
+from workers import CommandSpec, ToolingWorker, WorkerQueue
 
 from .recovery import RecoveryPolicy
 
@@ -98,7 +98,7 @@ class WorkflowBridge:
     def _execute_plan(self, plan: ExecutionPlan, *, completed_steps: list[str]) -> SamResult:
         run_logger = RunLogger(f"sam_v2 workflow {plan.plan_id}")
         action_logger = ActionLogger(f"sam_v2 workflow {plan.plan_id}", correlation_id=run_logger.run_id)
-        error_logger = ErrorLogger("sam_v2.supervisor.workflow")
+        error_logger = ErrorLogger("supervisor.workflow")
         summary_logger = SummaryLogger(f"sam_v2 workflow {plan.plan_id}", correlation_id=run_logger.run_id)
 
         run_logger.log("plan_started", {"plan_id": plan.plan_id, "goal": plan.goal, "step_count": len(plan.steps)})

@@ -10,10 +10,10 @@ from uuid import uuid4
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.storage.db import init_storage, log_audit_event
-from sam_v2.storage.models import AuditEvent
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
+from storage.db import init_storage, log_audit_event
+from storage.models import AuditEvent
 
 from .ws import WebSocketHub
 
@@ -58,7 +58,7 @@ def build_router(
             db_path,
             AuditEvent(
                 event_type="chat_received",
-                actor="sam_v2.daemon",
+                actor="daemon",
                 summary=body.message,
                 metadata_json=(
                     '{"session_id":"%s","message_id":"%s"}'

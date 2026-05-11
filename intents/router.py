@@ -7,12 +7,12 @@ from pathlib import Path
 import re
 from typing import Any
 
-from sam_v2.approvals import ApprovalManager, AuthorityEngine
-from sam_v2.capabilities import CapabilityAwarenessService, CapabilityRegistry, build_default_registry
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.llm import OllamaClient, OllamaIntentOutput
-from sam_v2.projects import (
+from approvals import ApprovalManager, AuthorityEngine
+from capabilities import CapabilityAwarenessService, CapabilityRegistry, build_default_registry
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
+from llm import OllamaClient, OllamaIntentOutput
+from projects import (
     ProjectExecutionRequest,
     ProjectInspector,
     ProjectPlanRequest,
@@ -22,11 +22,11 @@ from sam_v2.projects import (
     ProjectScaffolder,
     inspection_metadata,
 )
-from sam_v2.storage import TaskRecord, create_task, list_tasks, update_task
-from sam_v2.tools import SafeLocalTools, WorkspaceCleanupService
-from sam_v2.upgrades import UpgradeProposalManager
-from sam_v2.workers import CommandSpec, ToolingWorker
-from sam_v2.workflows import GoalService, PipelineService
+from storage import TaskRecord, create_task, list_tasks, update_task
+from tools import SafeLocalTools, WorkspaceCleanupService
+from upgrades import UpgradeProposalManager
+from workers import CommandSpec, ToolingWorker
+from workflows import GoalService, PipelineService
 
 
 @dataclass

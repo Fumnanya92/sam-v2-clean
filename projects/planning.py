@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from sys import executable as python_executable
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.workers import CommandSpec, FileEditSpec, FileWriteSpec, ToolingWorker
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
+from workers import CommandSpec, FileEditSpec, FileWriteSpec, ToolingWorker
 
 from .inspector import ProjectInspector, inspection_metadata
 from .registry import ProjectRecord, ProjectRegistry

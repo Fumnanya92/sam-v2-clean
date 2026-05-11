@@ -6,10 +6,10 @@ import sqlite3
 from pathlib import Path
 from typing import Optional, Tuple
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.storage.models import AuditEvent, TaskRecord
-from sam_v2.storage.schema import CREATE_INDEXES, CREATE_TABLES
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
+from storage.models import AuditEvent, TaskRecord
+from storage.schema import CREATE_INDEXES, CREATE_TABLES
 
 
 def _connect(db_path: str | Path) -> sqlite3.Connection:

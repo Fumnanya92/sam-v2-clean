@@ -8,10 +8,10 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.storage.db import log_audit_event
-from sam_v2.storage.models import AuditEvent
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
+from storage.db import log_audit_event
+from storage.models import AuditEvent
 
 _lock = Lock()
 
@@ -123,7 +123,7 @@ def save_memory(
                 audit_db_path,
                 AuditEvent(
                     event_type="memory_saved",
-                    actor="sam_v2.memory",
+                    actor="memory",
                     summary=f"Saved memory to {path.name}",
                     metadata_json='{"path":"%s"}' % str(path).replace("\\", "\\\\"),
                 ),

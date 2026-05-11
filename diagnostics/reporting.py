@@ -11,9 +11,9 @@ from .error_types import ErrorType
 from .log_manager import ensure_log_directories
 from .result import SamResult
 
-ACTION_LOG_DIR = Path("sam_v2/logs/actions")
-ERROR_LOG_DIR = Path("sam_v2/logs/errors")
-SUMMARY_LOG_DIR = Path("sam_v2/logs/summaries")
+ACTION_LOG_DIR = Path("logs/actions")
+ERROR_LOG_DIR = Path("logs/errors")
+SUMMARY_LOG_DIR = Path("logs/summaries")
 
 ensure_log_directories()
 

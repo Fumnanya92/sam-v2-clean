@@ -7,8 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
 
 
 def save_session_state(session_path: str | Path, state: dict[str, Any]) -> SamResult:

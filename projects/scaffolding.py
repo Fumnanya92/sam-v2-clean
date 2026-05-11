@@ -7,9 +7,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.workers import FileWriteSpec, ToolingWorker
+from diagnostics.error_types import ErrorType
+from diagnostics.result import SamResult
+from workers import FileWriteSpec, ToolingWorker
 
 from .registry import ProjectRecord, ProjectRegistry
 

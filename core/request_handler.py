@@ -5,17 +5,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from sam_v2.approvals import ApprovalManager, AuthorityEngine
-from sam_v2.capabilities import CapabilityRegistry
-from sam_v2.diagnostics.error_types import ErrorType
-from sam_v2.diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
-from sam_v2.diagnostics.result import SamResult
-from sam_v2.diagnostics.run_logger import RunLogger
-from sam_v2.intents import IntentRouter
-from sam_v2.memory.manager import load_memory, update_memory
-from sam_v2.memory.session import save_session_state
-from sam_v2.storage.db import log_audit_event
-from sam_v2.storage.models import AuditEvent
+from approvals import ApprovalManager, AuthorityEngine
+from capabilities import CapabilityRegistry
+from diagnostics.error_types import ErrorType
+from diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
+from diagnostics.result import SamResult
+from diagnostics.run_logger import RunLogger
+from intents import IntentRouter
+from memory.manager import load_memory, update_memory
+from memory.session import save_session_state
+from storage.db import log_audit_event
+from storage.models import AuditEvent
 
 from .session import RuntimeSession
 
@@ -47,7 +47,7 @@ class RequestHandler:
     def handle(self, user_text: str, session: RuntimeSession) -> SamResult:
         run_logger = RunLogger("sam_v2 core request")
         action_logger = ActionLogger("sam_v2 core request", correlation_id=run_logger.run_id)
-        error_logger = ErrorLogger("sam_v2.core.request")
+        error_logger = ErrorLogger("core.request")
         summary_logger = SummaryLogger("sam_v2 core request", correlation_id=run_logger.run_id)
         text = user_text.strip()
         run_logger.log("request_received", {"session_id": session.session_id, "text": text})
@@ -179,7 +179,7 @@ class RequestHandler:
             self.db_path,
             AuditEvent(
                 event_type="runtime_request_handled",
-                actor="sam_v2.core",
+                actor="core",
                 summary=result.summary,
                 metadata_json=json.dumps(audit_payload),
             ),
