@@ -12,6 +12,12 @@ from capabilities import CapabilityAwarenessService, CapabilityRegistry, build_d
 # Phase 1 planner and executor imports (surgical addition)
 from sam.planner.task_planner import TaskPlanner
 from sam.executor.tool_executor import ToolExecutor
+from intents._executor_tools_registry import register_all_executor_tools
+from sam.executor.service_tools import register_service_tools
+# Phase 4 worker-centric runtime import (surgical addition)
+from sam.executor.worker_runtime import create_worker_centric_executor
+# Phase 5 observation loop import (surgical addition)
+from sam.planner.observation_loop import create_observation_loop
 from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
 from llm import OllamaClient, OllamaIntentOutput
@@ -92,9 +98,15 @@ class IntentRouter:
         )
         # Initialise Phase 1 planner and executor
         self.task_planner = TaskPlanner(self.registry)
+        # Use base executor for registration, then wrap for worker tracking
         self.tool_executor = ToolExecutor()
         # Register the safe executor tools for the initial intents
         self._register_executor_tools()
+        # Phase 4: Wrap executor with worker-centric tracking
+        self._base_executor = self.tool_executor
+        self.tool_executor = create_worker_centric_executor(self._base_executor)
+        # Phase 5: Create observation loop for adaptive plan execution
+        self.observation_loop = create_observation_loop(self.task_planner, self.tool_executor)
 
     def parse(self, user_text: str, memory_block: dict[str, Any] | None = None) -> IntentRequest:
         """Understand a user request with the model first.
@@ -203,7 +215,7 @@ class IntentRouter:
         """Deprecated.
 
         Follow-up understanding must be handled by the LLM using memory context,
-        not by tic-tac/game-specific phrase rules.
+        not by project-specific phrase rules or hardcoded heuristics.
         """
         return None
 
@@ -588,61 +600,6 @@ class IntentRouter:
                 },
             )
 
-        if request.intent == "count_tictac_projects":
-            project_result, projects = self.project_registry.list_projects()
-            if not project_result.ok:
-                return self._service_result("count_tictac_projects", project_result)
-            tictac_projects = [
-                project
-                for project in projects
-                if any(
-                    token in project.name.lower()
-                    for token in ("tictac", "tic tac", "tic-tac", "tic tac toe")
-                )
-            ]
-            if not tictac_projects:
-                daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
-                last_created_name = str(daily_state.get("last_created_project_name", {}).get("value", "")).strip().lower()
-                if last_created_name:
-                    tictac_projects = [
-                        project
-                        for project in projects
-                        if project.name.lower() == last_created_name
-                    ]
-            latest = tictac_projects[-1] if tictac_projects else None
-            if not tictac_projects:
-                return SamResult(
-                    status="success",
-                    summary="I have not created any tic-tac game projects yet.",
-                    next_action="stop",
-                    metadata={
-                        "intent": "count_tictac_projects",
-                        "count": 0,
-                        "projects": [],
-                        "source": request.source,
-                        "confidence": request.confidence,
-                    },
-                )
-            latest_text = (
-                f" The latest one is {latest.name}."
-                if latest is not None
-                else ""
-            )
-            return SamResult(
-                status="success",
-                summary=f"I have created {len(tictac_projects)} tic-tac game project(s) so far.{latest_text}",
-                next_action="stop",
-                metadata={
-                    "intent": "count_tictac_projects",
-                    "count": len(tictac_projects),
-                    "projects": [project.name for project in tictac_projects],
-                    "latest_project_name": latest.name if latest is not None else "",
-                    "latest_project_root_path": latest.root_path if latest is not None else "",
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
         if request.intent == "project_details":
             query = str(request.parameters.get("query", "")).strip()
             if request.parameters.get("use_memory"):
@@ -1010,81 +967,25 @@ class IntentRouter:
         )
 
     # ---------------------------------------------------------------------
-    # Phase 1 planner / executor helpers
-    # ---------------------------------------------------------------------
+    # =========================================================================
+    # Phase 1: Executive Tool Registration
+    # =========================================================================
+
     def _register_executor_tools(self) -> None:
-        """Register a minimal safe set of tools for the initial intents.
+        """Register all tools/intents as executable handlers.
 
-        The handlers delegate to the existing router logic for each intent.
-        They return a ``SamResult`` so the executor can forward it unchanged.
+        Delegates to:
+        1. Comprehensive intent tool registry (_executor_tools_registry)
+        2. Service tools registry (service_tools) for utility operations
+        
+        All intent business logic and service handlers are extracted into
+        reusable tool handlers.
         """
-
-        # capabilities – describe self via awareness service
-        self.tool_executor.register(
-            "capabilities",
-            lambda payload: self.awareness.describe_self(),
-            description="Return Sam capabilities description",
-        )
-
-        # list_tasks – wrapper around storage list_tasks
-        def _list_tasks_handler(payload: dict[str, Any] | None = None) -> SamResult:
-            task_result, tasks = list_tasks(self.db_path)
-            if not task_result.ok:
-                return self._service_result("list_tasks", task_result)
-            if not tasks:
-                return SamResult(
-                    status="success",
-                    summary="I do not have any tracked tasks yet.",
-                    next_action="ask_user",
-                    metadata={
-                        "intent": "list_tasks",
-                        "count": 0,
-                        "tasks": [],
-                        "source": "router",
-                    },
-                )
-            task_items = [
-                {"id": t.id, "title": t.title, "status": t.status}
-                for t in tasks
-            ]
-            return SamResult(
-                status="success",
-                summary=f"Found {len(tasks)} tasks.",
-                next_action="stop",
-                metadata={
-                    "intent": "list_tasks",
-                    "count": len(tasks),
-                    "tasks": task_items,
-                    "source": "router",
-                },
-            )
-
-        self.tool_executor.register(
-            "list_tasks",
-            _list_tasks_handler,
-            description="List all tracked tasks",
-        )
-
-        # list_goals – wrapper around goal_service.list_goals
-        def _list_goals_handler(payload: dict[str, Any] | None = None) -> SamResult:
-            result, goals = self.goal_service.list_goals(status="active")
-            return self._service_result("list_goals", result, metadata={"goals": goals})
-
-        self.tool_executor.register(
-            "list_goals",
-            _list_goals_handler,
-            description="List active goals",
-        )
-
-        # list_projects – wrapper around project_registry.list_projects
-        def _list_projects_handler(payload: dict[str, Any] | None = None) -> SamResult:
-            result, projects = self.project_registry.list_projects()
-            return self._service_result("list_projects", result, metadata={"projects": projects})
-
-        self.tool_executor.register(
-            "list_projects",
-            _list_projects_handler,
-            description="List known projects",
+        register_all_executor_tools(self)
+        register_service_tools(
+            self.tool_executor,
+            repo_root=str(self.workspace_root),
+            db_path=str(self.db_path),
         )
 
     def _execute_with_planner(self, request: IntentRequest, memory_block: dict[str, Any] | None) -> SamResult:
@@ -1095,9 +996,16 @@ class IntentRouter:
         name. The payload is still passed through for completeness.
         """
         plan = self.task_planner.plan(request.intent, context={"request": request, "memory": memory_block})
-        # Use the intent name as the tool name for the safe intents we registered.
-        exec_result = self.tool_executor.execute(request.intent, plan.payload)
-        return exec_result
+        
+        # Use observation loop for adaptive execution (handles direct and multi-step modes)
+        result, step_executions = self.observation_loop.execute_plan(plan, memory_block)
+        
+        # Attach execution metadata
+        result.metadata.setdefault("execution_steps", len(step_executions))
+        result.metadata.setdefault("plan_mode", plan.mode)
+        result.metadata.setdefault("request_intent", request.intent)
+        
+        return result
 
     def _parse_with_llm(self, text: str, memory_block: dict[str, Any] | None = None) -> IntentRequest | None:
         if not text:

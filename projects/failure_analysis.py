@@ -26,12 +26,21 @@ class CommandFailureAnalysis:
 
 
 def resolve_flutter_command() -> str:
-    configured = os.getenv("SAM_V2_FLUTTER_BIN")
+    """Resolve flutter command with flexible path resolution.
+    
+    Priority:
+    1. Environment variable (FLUTTER_BIN or SAM_FLUTTER_BIN)
+    2. Standard PATH resolution (PATH environment variable)
+    3. Fallback to 'flutter' command
+    
+    Removed hardcoded C:\\flutter path for portability across developer machines.
+    """
+    # Support both generic FLUTTER_BIN and sam-specific SAM_FLUTTER_BIN
+    configured = os.getenv("FLUTTER_BIN") or os.getenv("SAM_FLUTTER_BIN")
     if configured:
         return configured
-    windows_default = Path(r"C:\flutter\bin\flutter.bat")
-    if windows_default.exists():
-        return str(windows_default)
+    
+    # Let system PATH resolve flutter (most portable approach)
     return "flutter"
 
 
