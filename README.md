@@ -2,9 +2,9 @@
 
 Sam is my personal AI assistant.
 
-The vision is to build a practical assistant that can help with real tasks on my computer, support my development workflow, and grow into a reliable system I can use every day.
+The vision is to build a practical assistant that helps with real tasks on my computer, supports my development workflow, and grows into a reliable system I can use every day.
 
-Sam should feel simple to use, easy to improve, and safe enough to trust with important work.
+Sam should feel simple to use, easy to improve, and clear in how it works.
 
 ## Vision
 
@@ -12,7 +12,7 @@ Sam is being built to:
 
 - understand what I want to do
 - help plan and complete tasks
-- use tools and workers when needed
+- use tools when needed
 - run checks and tests where possible
 - explain what happened clearly
 - keep useful logs and history
@@ -41,31 +41,31 @@ Once the foundation is stable, features will be added gradually.
 Native desktop shell:
 
 ```bash
-python -m sam_v2
+python -m sam
 ```
 
 One-shot request:
 
 ```bash
-python -m sam_v2 --once "what can you do"
+python -m sam --once "what can you do"
 ```
 
 Interactive CLI:
 
 ```bash
-python -m sam_v2 --cli
+python -m sam --cli
 ```
 
 Daemon mode:
 
 ```bash
-python -m sam_v2 --daemon
+python -m sam --daemon
 ```
 
 Native UI mode:
 
 ```bash
-python -m sam_v2 --native-ui
+python -m sam --native-ui
 ```
 
 ## Project Direction
@@ -83,8 +83,8 @@ Planned areas include:
 - developer workflow support
 - API/daemon mode
 - native desktop interface
-- controlled task execution
-- approval flow for sensitive actions
+- task execution
+- approval flow for important actions
 - future integrations
 
 ## Repository Status
