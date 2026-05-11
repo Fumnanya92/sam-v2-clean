@@ -1,4 +1,4 @@
-"""Log workspace helpers for Sam v2."""
+"""Log workspace helpers for Sam."""
 
 from __future__ import annotations
 
