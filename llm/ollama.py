@@ -1,4 +1,4 @@
-"""Minimal Ollama client for Sam v2 understanding tasks."""
+"""Minimal Ollama client for Sam understanding tasks."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ class OllamaClient:
         projects_json = json.dumps(known_projects or [], ensure_ascii=True)
         prompt = "\n".join(
             [
-                "You are Sam v2's autonomous request understanding layer.",
+                "You are Sam's autonomous request understanding layer.",
                 "Return JSON only.",
                 "Interpret the user's meaning, not just keywords.",
                 "Use the closest supported intent when the request clearly maps to one.",
@@ -133,7 +133,7 @@ class OllamaClient:
                 "For scaffold_project, only choose it when the user is actually asking to create/build/start a new project.",
                 "For count_tictac_projects, use it when the user asks how many tic-tac projects exist or asks about previously created tic-tac games.",
                 "For open_folder and open_file, prefer them when the user asks to open a local folder or file on the machine.",
-                "For inspect_workspace_cleanup, use it when the user asks to inspect, organize, or find duplicates in sam_v2/workspace.",
+                "For inspect_workspace_cleanup, use it when the user asks to inspect, organize, or find duplicates in the workspace.",
                 "For cleanup_workspace_duplicates, use it only when the user is explicitly confirming cleanup or deletion of duplicates.",
                 "For chat, provide a brief conversational response_text.",
                 "For clarification, response_text may be empty.",
