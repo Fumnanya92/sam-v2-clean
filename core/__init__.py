@@ -1,4 +1,4 @@
-"""Sam v2 core runtime foundation."""
+"""Sam core runtime foundation."""
 
 from .request_handler import RequestHandler
 from .runtime import SamRuntime
