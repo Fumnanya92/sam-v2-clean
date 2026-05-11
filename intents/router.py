@@ -9,6 +9,9 @@ from typing import Any
 
 from approvals import ApprovalManager, AuthorityEngine
 from capabilities import CapabilityAwarenessService, CapabilityRegistry, build_default_registry
+# Phase 1 planner and executor imports (surgical addition)
+from sam.planner.task_planner import TaskPlanner
+from sam.executor.tool_executor import ToolExecutor
 from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
 from llm import OllamaClient, OllamaIntentOutput
@@ -87,6 +90,11 @@ class IntentRouter:
             project_registry=self.project_registry,
             upgrade_manager=self.upgrade_manager,
         )
+        # Initialise Phase 1 planner and executor
+        self.task_planner = TaskPlanner(self.registry)
+        self.tool_executor = ToolExecutor()
+        # Register the safe executor tools for the initial intents
+        self._register_executor_tools()
 
     def parse(self, user_text: str, memory_block: dict[str, Any] | None = None) -> IntentRequest:
         """Understand a user request with the model first.
@@ -226,6 +234,10 @@ class IntentRouter:
         approval_result = self._check_authority(request, capability.action_category)
         if approval_result is not None:
             return approval_result
+
+        # Phase 1 routing for a limited set of intents via planner & executor
+        if request.intent in {"capabilities", "list_tasks", "list_goals", "list_projects"}:
+            return self._execute_with_planner(request, memory_block)
 
         if request.intent == "capabilities":
             awareness_result = self.awareness.describe_self()
@@ -996,6 +1008,96 @@ class IntentRouter:
                 "confidence": request.confidence,
             },
         )
+
+    # ---------------------------------------------------------------------
+    # Phase 1 planner / executor helpers
+    # ---------------------------------------------------------------------
+    def _register_executor_tools(self) -> None:
+        """Register a minimal safe set of tools for the initial intents.
+
+        The handlers delegate to the existing router logic for each intent.
+        They return a ``SamResult`` so the executor can forward it unchanged.
+        """
+
+        # capabilities – describe self via awareness service
+        self.tool_executor.register(
+            "capabilities",
+            lambda payload: self.awareness.describe_self(),
+            description="Return Sam capabilities description",
+        )
+
+        # list_tasks – wrapper around storage list_tasks
+        def _list_tasks_handler(payload: dict[str, Any] | None = None) -> SamResult:
+            task_result, tasks = list_tasks(self.db_path)
+            if not task_result.ok:
+                return self._service_result("list_tasks", task_result)
+            if not tasks:
+                return SamResult(
+                    status="success",
+                    summary="I do not have any tracked tasks yet.",
+                    next_action="ask_user",
+                    metadata={
+                        "intent": "list_tasks",
+                        "count": 0,
+                        "tasks": [],
+                        "source": "router",
+                    },
+                )
+            task_items = [
+                {"id": t.id, "title": t.title, "status": t.status}
+                for t in tasks
+            ]
+            return SamResult(
+                status="success",
+                summary=f"Found {len(tasks)} tasks.",
+                next_action="stop",
+                metadata={
+                    "intent": "list_tasks",
+                    "count": len(tasks),
+                    "tasks": task_items,
+                    "source": "router",
+                },
+            )
+
+        self.tool_executor.register(
+            "list_tasks",
+            _list_tasks_handler,
+            description="List all tracked tasks",
+        )
+
+        # list_goals – wrapper around goal_service.list_goals
+        def _list_goals_handler(payload: dict[str, Any] | None = None) -> SamResult:
+            result, goals = self.goal_service.list_goals(status="active")
+            return self._service_result("list_goals", result, metadata={"goals": goals})
+
+        self.tool_executor.register(
+            "list_goals",
+            _list_goals_handler,
+            description="List active goals",
+        )
+
+        # list_projects – wrapper around project_registry.list_projects
+        def _list_projects_handler(payload: dict[str, Any] | None = None) -> SamResult:
+            result, projects = self.project_registry.list_projects()
+            return self._service_result("list_projects", result, metadata={"projects": projects})
+
+        self.tool_executor.register(
+            "list_projects",
+            _list_projects_handler,
+            description="List known projects",
+        )
+
+    def _execute_with_planner(self, request: IntentRequest, memory_block: dict[str, Any] | None) -> SamResult:
+        """Create a plan via ``TaskPlanner`` and execute it with ``ToolExecutor``.
+
+        For Phase 1 we know the intent maps directly to a registered tool, so we
+        bypass the generic ``assistant.respond`` fallback and invoke the tool by
+        name. The payload is still passed through for completeness.
+        """
+        plan = self.task_planner.plan(request.intent, context={"request": request, "memory": memory_block})
+        # Use the intent name as the tool name for the safe intents we registered.
+        exec_result = self.tool_executor.execute(request.intent, plan.payload)
+        return exec_result
 
     def _parse_with_llm(self, text: str, memory_block: dict[str, Any] | None = None) -> IntentRequest | None:
         if not text:
