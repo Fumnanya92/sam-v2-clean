@@ -1,4 +1,4 @@
-"""Capability registry for the Sam v2 intent layer."""
+"""Capability registry for the Sam intent layer."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def build_default_registry() -> CapabilityRegistry:
     registry.register(
         Capability(
             intent="capabilities",
-            description="List currently migrated Sam v2 capabilities.",
+            description="List currently available Sam capabilities.",
             action_category="read_data",
         )
     )
@@ -136,7 +136,7 @@ def build_default_registry() -> CapabilityRegistry:
     registry.register(
         Capability(
             intent="open_folder",
-            description="Open a local folder such as Downloads, Documents, Desktop, Sam-Agent, or an explicit path.",
+            description="Open a local folder such as Downloads, Documents, Desktop, a project folder, or an explicit path.",
             action_category="execute_command",
             requires_write=True,
         )
@@ -144,14 +144,14 @@ def build_default_registry() -> CapabilityRegistry:
     registry.register(
         Capability(
             intent="inspect_workspace_cleanup",
-            description="Inspect the Sam v2 workspace and propose duplicate cleanup candidates.",
+            description="Inspect the workspace and propose duplicate cleanup candidates.",
             action_category="read_data",
         )
     )
     registry.register(
         Capability(
             intent="cleanup_workspace_duplicates",
-            description="Delete duplicate Sam v2 workspace projects and runtime artifacts after explicit confirmation.",
+            description="Delete duplicate workspace projects and runtime artifacts after explicit confirmation.",
             action_category="write_data",
             requires_write=True,
         )
@@ -172,13 +172,6 @@ def build_default_registry() -> CapabilityRegistry:
     )
     registry.register(
         Capability(
-            intent="count_tictac_projects",
-            description="Count known tic-tac-style projects in the project registry and report the latest one.",
-            action_category="read_data",
-        )
-    )
-    registry.register(
-        Capability(
             intent="project_details",
             description="Find a known project and describe its stored context.",
             action_category="read_data",
@@ -187,7 +180,7 @@ def build_default_registry() -> CapabilityRegistry:
     registry.register(
         Capability(
             intent="scaffold_project",
-            description="Create a modular starter project in the managed workspace and register it.",
+            description="Create a new project in the managed workspace and register it.",
             action_category="write_data",
             requires_write=True,
         )
