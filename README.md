@@ -1,131 +1,94 @@
-# Sam v2 Clean
+# Sam v2
 
-Sam v2 Clean is the new working home for Sam.
+Sam v2 is a clean rebuild of Sam, my personal AI assistant.
 
-The goal is not to dump every old feature back into the assistant. The goal is to rebuild Sam into a stable, testable, Python-first assistant that can grow without breaking itself.
+The vision is to build a practical assistant that can help with real tasks on my computer, support my development workflow, and grow into a reliable system I can use every day.
 
-## What Sam Should Be
+Sam should feel simple to use, easy to improve, and safe enough to trust with important work.
 
-Sam is a personal AI assistant built to help with real work:
+## Vision
 
-- understand a user request
-- decide the safest next action
-- use local tools where possible
-- call an LLM only when needed
-- keep logs of what happened
-- report errors clearly
-- ask for approval before sensitive actions
-- support CLI, daemon, and desktop UI modes
+Sam v2 is being built to:
 
-## Current Direction
+- understand what I want to do
+- help plan and complete tasks
+- use tools and workers when needed
+- run checks and tests where possible
+- explain what happened clearly
+- keep useful logs and history
+- support local-first execution where it makes sense
+- use LLMs wisely instead of depending on them for everything
 
-This repo is now the source of truth for Sam v2.
+The long-term goal is to have an assistant that can move from conversation to action without becoming messy, expensive, or hard to maintain.
 
-Old Sam files may exist in the repository as reference material, but they are not automatically trusted. A feature is only considered part of Sam v2 when it has been moved into the clean `sam_v2/` structure, tested, and documented.
+## Current Focus
 
-## Core Rules
+The first focus is the foundation:
 
-1. Keep it Python-first.
-2. Keep it code-first before LLM-first.
-3. Do not add ten features at once.
-4. Migrate one feature, test it, then move to the next.
-5. Every tool should return a structured result.
-6. Every failure should be logged clearly.
-7. Sensitive actions must require approval.
-8. No feature is complete until it runs live.
+- a working Python package
+- command-line usage
+- one-shot requests
+- daemon/API mode
+- local runtime structure
+- logging and diagnostics
+- simple tool execution
+- migration tracking
 
-## Planned Runtime Modes
+Once the foundation is stable, features will be added gradually.
 
-Sam v2 should support these modes:
+## Running Sam
 
-### Native desktop shell
+Native desktop shell:
 
 ```bash
 python -m sam_v2
 ```
 
-### One-shot command
+One-shot request:
 
 ```bash
 python -m sam_v2 --once "what can you do"
 ```
 
-### CLI mode
+Interactive CLI:
 
 ```bash
 python -m sam_v2 --cli
 ```
 
-### Daemon/API mode
+Daemon mode:
 
 ```bash
 python -m sam_v2 --daemon
 ```
 
-### Explicit native UI mode
+Native UI mode:
 
 ```bash
 python -m sam_v2 --native-ui
 ```
 
-## Current Status
+## Project Direction
 
-Sam v2 is in rebuild mode.
+Sam v2 will grow step by step.
 
-The first milestone is to make the foundation work reliably:
+The idea is to keep the system understandable while still making it powerful. Each major feature should be easy to test, easy to debug, and easy to improve later.
 
-- package entrypoint
-- config loading
-- runtime core
-- structured result system
-- logging
-- CLI mode
-- one-shot mode
-- daemon health endpoint
-- basic tests
+Planned areas include:
 
-After that, features can be migrated one by one.
+- assistant core
+- memory
+- local tools
+- browser and desktop automation
+- developer workflow support
+- API/daemon mode
+- native desktop interface
+- controlled task execution
+- approval flow for sensitive actions
+- future integrations
 
-## Suggested Clean Structure
+## Repository Status
 
-```text
-sam_v2/
-  __init__.py
-  __main__.py
-  config/
-  core/
-  daemon/
-  diagnostics/
-  memory/
-  tools/
-  native_ui/
-  tests/
-```
+This repository is now the main workspace for Sam v2.
 
-Reference or old code should stay outside the clean runtime path until it is reviewed.
-
-## Migration Rule
-
-A migrated feature must have:
-
-- a clear purpose
-- a clean module location
-- no hidden dependency on old broken code
-- structured success/error output
-- a simple way to test it
-- a note in the migration tracker
-
-## Immediate Priority
-
-Do not start with multi-agent, WhatsApp, dashboard, or heavy automation.
-
-Start with the foundation:
-
-1. `python -m sam_v2 --once "what can you do"`
-2. `python -m sam_v2 --cli`
-3. `python -m sam_v2 --daemon`
-4. health endpoint
-5. logging
-6. simple tool execution
-
-Once these work, Sam can grow safely.
+The README will keep changing as the project grows.
