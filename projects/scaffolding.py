@@ -1,4 +1,4 @@
-"""Project scaffolding helpers for organized Sam v2 project starts."""
+"""Project scaffolding helpers for organized Sam project starts."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <body>
   <main class="app-shell">
     <header class="hero">
-      <p class="eyebrow">Sam v2 scaffold</p>
+      <p class="eyebrow">Sam scaffold</p>
       <h1>{title}</h1>
       <p class="lede">A modular browser game scaffold with separate markup, styles, and logic.</p>
     </header>
@@ -227,8 +227,8 @@ def main() -> int:
         print("scaffold project ready")
         return 0
 
-    if os.getenv("SAM_V2_NO_BROWSER") == "1":
-        print(f"launch target {launch_url} (browser disabled by SAM_V2_NO_BROWSER)")
+    if os.getenv("SAM_NO_BROWSER") == "1":
+        print(f"launch target {launch_url} (browser disabled by SAM_NO_BROWSER)")
         return 0
 
     launch_error = None
@@ -258,7 +258,7 @@ if __name__ == "__main__":
 
 README_MD = """# {title}
 
-Created by Sam v2 as a modular HTML game scaffold.
+Created by Sam as a modular HTML game scaffold.
 
 ## Structure
 
@@ -275,7 +275,7 @@ python run_project.py
 python run_project.py --check
 ```
 
-If `SAM_V2_NO_BROWSER=1` is set, Sam will validate and print the launch target without opening the browser.
+If `SAM_NO_BROWSER=1` is set, Sam will validate and print the launch target without opening the browser.
 """
 
 PLAN_MD = """# Project Plan
@@ -329,7 +329,8 @@ class ProjectScaffolder:
                 next_action="ask_user",
             )
 
-        if request.project_type != "html_game":
+        project_type = self._normalize_project_type(request.project_type, title)
+        if project_type != "html_game":
             return SamResult(
                 status="failed",
                 summary="That scaffold type is not available yet.",
@@ -381,7 +382,7 @@ class ProjectScaffolder:
             )
 
         register_result = self.project_registry.register(
-                ProjectRecord(
+            ProjectRecord(
                 project_id=project_id,
                 name=title,
                 root_path=str(project_root),
@@ -410,11 +411,20 @@ class ProjectScaffolder:
                 "name": title,
                 "root_path": str(project_root),
                 "stack": "html + css + javascript",
+                "project_type": project_type,
                 "run_command": [sys.executable, "run_project.py"],
                 "important_files": ["index.html", "styles.css", "app.js", "README.md", "PLAN.md", "run_project.py"],
                 "delegation": delegation,
             },
         )
+
+    @staticmethod
+    def _normalize_project_type(project_type: str, title: str = "") -> str:
+        raw = f"{project_type} {title}".lower().replace("_", "-")
+        raw = re.sub(r"\s+", " ", raw).strip()
+        if any(token in raw for token in ("html", "browser", "web", "javascript", "tic tac", "tic-tac", "tictac", "game")):
+            return "html_game"
+        return project_type.strip().lower().replace(" ", "_") or "html_game"
 
     @staticmethod
     def _slugify(text: str) -> str:
