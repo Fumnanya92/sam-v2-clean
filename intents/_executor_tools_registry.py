@@ -33,9 +33,32 @@ def register_all_executor_tools(router: Any) -> None:
     # Metadata & Capability Tools
     # =========================================================================
 
+    def _capabilities_handler(payload: dict[str, Any] | None = None) -> SamResult:
+        result = router.awareness.describe_self()
+        if not result.ok:
+            return result
+        capabilities = result.metadata.get("available_capabilities", [])
+        projects = result.metadata.get("known_projects", [])
+        missing = result.metadata.get("missing_capabilities", [])
+        
+        summary_parts = []
+        if capabilities:
+            summary_parts.append(f"Available: {', '.join(capabilities[:3])}" + (f" (and {len(capabilities)-3} more)" if len(capabilities) > 3 else ""))
+        if projects:
+            summary_parts.append(f"Projects: {', '.join(projects)}")
+        if missing:
+            summary_parts.append(f"Missing: {', '.join(missing[:2])}" + (f" (and {len(missing)-2} more)" if len(missing) > 2 else ""))
+        
+        return SamResult(
+            status="success",
+            summary=" | ".join(summary_parts) if summary_parts else "No capabilities available.",
+            next_action="stop",
+            metadata=result.metadata,
+        )
+
     executor.register(
         "capabilities",
-        lambda payload: router.awareness.describe_self(),
+        _capabilities_handler,
         description="Describe Sam's capabilities and awareness",
         action_category="read_data",
     )
@@ -187,7 +210,25 @@ def register_all_executor_tools(router: Any) -> None:
 
     def _list_goals_handler(payload: dict[str, Any] | None = None) -> SamResult:
         result, goals = router.goal_service.list_goals(status="active")
-        return router._service_result("list_goals", result, metadata={"count": len(goals), "goals": goals})
+        if not result.ok:
+            return router._service_result("list_goals", result)
+        if not goals:
+            return SamResult(
+                status="success",
+                summary="I don't have any active goals yet.",
+                next_action="ask_user",
+                metadata={"intent": "list_goals", "count": 0, "goals": []},
+            )
+        goal_items = [f"• {g.title}" for g in goals]
+        preview = "\n".join(goal_items[:3])
+        if len(goal_items) > 3:
+            preview += f"\n... and {len(goal_items) - 3} more"
+        return SamResult(
+            status="success",
+            summary=f"Active goals ({len(goal_items)}): {preview}",
+            next_action="stop",
+            metadata={"count": len(goals), "goals": goals},
+        )
 
     executor.register(
         "list_goals",
@@ -243,15 +284,20 @@ def register_all_executor_tools(router: Any) -> None:
         file_result, content = router.project_inspector.tools.read_text_file(path_text)
         if not file_result.ok or content is None:
             return router._service_result("read_file", file_result, metadata={"path": path_text})
+        lines = content.split("\n") if content else []
+        preview = "\n".join(lines[:10])
+        if len(lines) > 10:
+            preview += f"\n... ({len(lines) - 10} more lines)"
         return SamResult(
             status="success",
-            summary="File read succeeded.",
+            summary=f"File read: {len(content)} chars, {len(lines)} lines.\n{preview}",
             next_action="stop",
             metadata={
                 "intent": "read_file",
                 "path": file_result.metadata.get("path", path_text),
                 "content": content,
                 "chars_returned": file_result.metadata.get("chars_returned", len(content)),
+                "lines": len(lines),
             },
         )
 

@@ -989,13 +989,27 @@ class IntentRouter:
         )
 
     def _execute_with_planner(self, request: IntentRequest, memory_block: dict[str, Any] | None) -> SamResult:
-        """Create a plan via ``TaskPlanner`` and execute it with ``ToolExecutor``.
+        """Create a plan and execute with observation loop for adaptive execution.
 
-        For Phase 1 we know the intent maps directly to a registered tool, so we
-        bypass the generic ``assistant.respond`` fallback and invoke the tool by
-        name. The payload is still passed through for completeness.
+        Phase 5 plan-act-observe-continue cycle:
+        1. Plan: TaskPlanner generates direct or multi-step plan
+        2. Act: ObservationLoop executes via WorkerCentricExecutor with monitoring
+        3. Observe: Extracts observations and results
+        4. Continue: Makes adaptive decisions (retry, skip, ask user, etc.)
         """
-        plan = self.task_planner.plan(request.intent, context={"request": request, "memory": memory_block})
+        # Get available tools for planning context
+        available_tools = self.tool_executor.available_tools
+        
+        # Create planning context with intent, available tools, and memory
+        plan = self.task_planner.plan(
+            request.intent,
+            context={
+                "request": request,
+                "memory": memory_block,
+                "intent": request.intent,
+                "available_tools": available_tools,
+            }
+        )
         
         # Use observation loop for adaptive execution (handles direct and multi-step modes)
         result, step_executions = self.observation_loop.execute_plan(plan, memory_block)
@@ -1006,6 +1020,7 @@ class IntentRouter:
         result.metadata.setdefault("request_intent", request.intent)
         
         return result
+
 
     def _parse_with_llm(self, text: str, memory_block: dict[str, Any] | None = None) -> IntentRequest | None:
         if not text:
