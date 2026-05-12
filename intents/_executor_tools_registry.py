@@ -288,9 +288,15 @@ def register_all_executor_tools(router: Any) -> None:
         preview = "\n".join(lines[:10])
         if len(lines) > 10:
             preview += f"\n... ({len(lines) - 10} more lines)"
+        wants_summary = router._wants_summary(request.raw_text) if request else False
+        summary = (
+            router._summarize_text(content, path_text)
+            if wants_summary
+            else f"File read: {len(content)} chars, {len(lines)} lines.\n{preview}"
+        )
         return SamResult(
             status="success",
-            summary=f"File read: {len(content)} chars, {len(lines)} lines.\n{preview}",
+            summary=summary,
             next_action="stop",
             metadata={
                 "intent": "read_file",
@@ -298,6 +304,7 @@ def register_all_executor_tools(router: Any) -> None:
                 "content": content,
                 "chars_returned": file_result.metadata.get("chars_returned", len(content)),
                 "lines": len(lines),
+                "summary_mode": wants_summary,
             },
         )
 
@@ -352,9 +359,16 @@ def register_all_executor_tools(router: Any) -> None:
         if not directory_result.ok:
             return router._service_result("list_directory", directory_result, metadata={"path": path_text})
         preview = entries[:12]
+        remaining = max(0, len(entries) - len(preview))
+        summary = f"{len(entries)} item(s) in {directory_result.metadata.get('path', path_text)}."
+        if preview:
+            summary += " " + ", ".join(preview)
+            if remaining:
+                summary += f", and {remaining} more"
+            summary += "."
         return SamResult(
             status="success",
-            summary="Directory listing succeeded.",
+            summary=summary,
             next_action="stop",
             metadata={
                 "intent": "list_directory",
@@ -667,7 +681,7 @@ def register_all_executor_tools(router: Any) -> None:
 
     def _inspect_project_repo_handler(payload: dict[str, Any] | None = None) -> SamResult:
         request = payload.get("request") if payload else None
-        query = str((request.parameters if request else {}).get("query", "")).strip()
+        query = router._query_or_path_from_request(request) if request else ""
         if not query:
             return SamResult(
                 status="failed",
@@ -706,7 +720,7 @@ def register_all_executor_tools(router: Any) -> None:
 
     def _inspect_git_state_handler(payload: dict[str, Any] | None = None) -> SamResult:
         request = payload.get("request") if payload else None
-        query = str((request.parameters if request else {}).get("query", "")).strip()
+        query = router._query_or_path_from_request(request) if request else ""
         if not query:
             return SamResult(
                 status="failed",
@@ -717,19 +731,31 @@ def register_all_executor_tools(router: Any) -> None:
                 metadata={"intent": "inspect_git_state"},
             )
         project_result, project = router.project_registry.find_project(query)
-        if not project_result.ok or project is None:
-            return router._service_result("inspect_git_state", project_result, metadata={"query": query})
-        git_result, snapshot = router.project_inspector.tools.inspect_git_state(project.root_path)
+        project_id = ""
+        project_name = ""
+        repo_path = query
+        if project_result.ok and project is not None:
+            project_id = project.project_id
+            project_name = project.name
+            repo_path = project.root_path
+        else:
+            directory_result, directory = router.project_inspector.tools.resolve_directory_query(query)
+            if not directory_result.ok or directory is None:
+                return router._service_result("inspect_git_state", project_result, metadata={"query": query})
+            project_name = directory.name
+            repo_path = str(directory)
+
+        git_result, snapshot = router.project_inspector.tools.inspect_git_state(repo_path)
         if not git_result.ok or snapshot is None:
             return router._service_result("inspect_git_state", git_result, metadata={"query": query})
         return SamResult(
             status="success",
-            summary=f"Git state for {project.name}: branch {snapshot.branch}, clean={snapshot.is_clean}.",
+            summary=f"Git state for {project_name}: branch {snapshot.branch}, clean={snapshot.is_clean}.",
             next_action="stop",
             metadata={
                 "intent": "inspect_git_state",
-                "project_id": project.project_id,
-                "name": project.name,
+                "project_id": project_id,
+                "name": project_name,
                 "repo_root": snapshot.repo_root,
                 "branch": snapshot.branch,
                 "is_clean": snapshot.is_clean,
@@ -915,11 +941,33 @@ def register_all_executor_tools(router: Any) -> None:
     # =========================================================================
 
     def _inspect_repo_handler(payload: dict[str, Any] | None = None) -> SamResult:
+        request = payload.get("request") if payload else None
+        query = router._query_or_path_from_request(request) if request else ""
+        if not query:
+            return SamResult(
+                status="success",
+                summary="I can inspect a repo, but I need the project path or registered project name first.",
+                next_action="ask_user",
+                metadata={"intent": "inspect_repo"},
+            )
+        inspect_result, inspection = router.project_inspector.inspect(query)
+        if not inspect_result.ok or inspection is None:
+            return router._service_result("inspect_repo", inspect_result, metadata={"query": query})
+        metadata = inspection_metadata(inspection)
+        metadata["intent"] = "inspect_repo"
+        changed_summary = (
+            "clean working tree"
+            if inspection.is_clean
+            else f"{len(inspection.changed_files)} changed file(s)"
+        )
         return SamResult(
             status="success",
-            summary="I can inspect a repo, but I need the project path or registered project name first.",
-            next_action="ask_user",
-            metadata={"intent": "inspect_repo"},
+            summary=(
+                f"{inspection.name} is on branch {inspection.branch or 'unknown'} with a "
+                f"{changed_summary}."
+            ),
+            next_action="stop",
+            metadata=metadata,
         )
 
     executor.register(

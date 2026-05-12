@@ -35,7 +35,10 @@ class ProjectInspector:
     def inspect(self, query: str) -> tuple[SamResult, ProjectInspection | None]:
         project_result, project = self.registry.find_project(query)
         if not project_result.ok or project is None:
-            return project_result, None
+            directory_result, directory = self.tools.resolve_directory_query(query)
+            if not directory_result.ok or directory is None:
+                return project_result, None
+            return self.inspect_path(directory)
 
         git_result, snapshot = self.tools.inspect_git_state(project.root_path)
         if not git_result.ok or snapshot is None:
@@ -74,10 +77,66 @@ class ProjectInspector:
             inspection,
         )
 
+    def inspect_path(self, root_path: str | Path) -> tuple[SamResult, ProjectInspection | None]:
+        root = Path(root_path)
+        git_result, snapshot = self.tools.inspect_git_state(root)
+        if not git_result.ok or snapshot is None:
+            return git_result, None
+
+        dir_result, entries = self.tools.list_directory(root)
+        if not dir_result.ok:
+            return dir_result, None
+
+        samples = self._read_important_files_from_root(root)
+        inspection = ProjectInspection(
+            project_id="",
+            name=root.name,
+            root_path=str(root),
+            stack="",
+            branch=snapshot.branch,
+            is_clean=snapshot.is_clean,
+            changed_files=snapshot.changed_files,
+            top_level_entries=entries,
+            important_file_samples=samples,
+            test_command=[],
+            build_command=[],
+        )
+        return (
+            SamResult(
+                status="success",
+                summary=f"Inspected repository {root.name}.",
+                next_action="stop",
+                metadata={
+                    "name": root.name,
+                    "root_path": str(root),
+                    "branch": snapshot.branch,
+                    "is_clean": snapshot.is_clean,
+                },
+            ),
+            inspection,
+        )
+
     def _read_important_files(self, project: ProjectRecord) -> dict[str, str]:
+        return self._read_important_files_from_root(
+            Path(project.root_path),
+            relative_paths=project.important_files or [],
+        )
+
+    def _read_important_files_from_root(
+        self,
+        root: Path,
+        *,
+        relative_paths: list[str] | None = None,
+    ) -> dict[str, str]:
         samples: dict[str, str] = {}
-        root = Path(project.root_path)
-        for relative_path in (project.important_files or [])[:3]:
+        candidates = relative_paths or [
+            "README.md",
+            "package.json",
+            "pyproject.toml",
+            "requirements.txt",
+            "main.py",
+        ]
+        for relative_path in candidates[:3]:
             target = root / relative_path
             read_result, content = self.tools.read_text_file(target, max_chars=300)
             if read_result.ok and content is not None:

@@ -18,6 +18,19 @@ from diagnostics.result import SamResult
 from workers.monitor import WorkerMonitor, worker_monitor
 
 
+def _worker_identity_for_tool(tool_name: str) -> tuple[str, str]:
+    normalized = tool_name.lower()
+    if any(token in normalized for token in ("scan", "inspect", "read", "list", "details")):
+        return "Inspector", "inspect"
+    if any(token in normalized for token in ("test", "syntax", "health", "compile")):
+        return "Nigel", "test"
+    if any(token in normalized for token in ("plan", "delegation", "progress", "status")):
+        return "Coordinator", "planning"
+    if any(token in normalized for token in ("run", "execute")):
+        return "Priase", "dev"
+    return "ToolExecutor", "executor"
+
+
 class WorkerExecutionContext:
     """Tracks execution context for a tool invocation with worker lifecycle."""
     
@@ -28,10 +41,11 @@ class WorkerExecutionContext:
     
     def start(self, description: str = "") -> None:
         """Create and start a worker task."""
+        worker_name, worker_type = _worker_identity_for_tool(self.tool_name)
         self.task = self.monitor.create_task(
             name=f"execute_{self.tool_name}",
-            worker_type="executor",
-            worker_name="ToolExecutor",
+            worker_type=worker_type,
+            worker_name=worker_name,
             description=description or f"Execute {self.tool_name}",
         )
         self.monitor.mark_running(self.task.task_id)
@@ -134,7 +148,8 @@ class WorkerCentricExecutor:
                 
                 # Attach worker metadata
                 result.metadata.setdefault("worker_task_id", context.task.task_id if context.task else None)
-                result.metadata.setdefault("worker_name", "ToolExecutor")
+                result.metadata.setdefault("worker_name", context.task.worker_name if context.task else "ToolExecutor")
+                result.metadata.setdefault("worker_type", context.task.worker_type if context.task else "executor")
             
             return result
         
@@ -152,7 +167,8 @@ class WorkerCentricExecutor:
                 metadata={
                     "tool": tool_name,
                     "worker_task_id": context.task.task_id if context.task else None,
-                    "worker_name": "ToolExecutor",
+                    "worker_name": context.task.worker_name if context.task else "ToolExecutor",
+                    "worker_type": context.task.worker_type if context.task else "executor",
                 },
             )
 

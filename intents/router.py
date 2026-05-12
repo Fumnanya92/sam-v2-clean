@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
@@ -32,9 +33,9 @@ from projects import (
     inspection_metadata,
 )
 from storage import TaskRecord, create_task, list_tasks, update_task
-from tools import SafeLocalTools, WorkspaceCleanupService
+from tools import CodebaseCleanupService, SafeLocalTools, WorkspaceCleanupService
 from upgrades import UpgradeProposalManager
-from workers import CommandSpec, ToolingWorker
+from workers import CommandSpec, ToolingWorker, worker_monitor
 from workflows import GoalService, PipelineService
 
 
@@ -132,7 +133,7 @@ class IntentRouter:
 
         llm_request = self._parse_with_llm(text, memory_block)
         if llm_request is not None:
-            return llm_request
+            return self._apply_contextual_request(text, llm_request, memory_block)
 
         return self._parse_with_rules(text)
 
@@ -454,18 +455,32 @@ class IntentRouter:
                     error_message="missing file path",
                     next_action="ask_user",
                 )
-            file_result, content = self.project_inspector.tools.read_text_file(path_text)
+            additional_roots: list[str] = []
+            daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
+            last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "")).strip()
+            if last_project_root:
+                additional_roots.append(last_project_root)
+            resolve_result, resolved_file = self.project_inspector.tools.resolve_file_query(
+                path_text,
+                additional_roots=additional_roots,
+            )
+            if not resolve_result.ok or resolved_file is None:
+                return self._service_result("read_file", resolve_result, metadata={"path": path_text})
+            file_result, content = self.project_inspector.tools.read_text_file(resolved_file)
             if not file_result.ok or content is None:
                 return self._service_result("read_file", file_result, metadata={"path": path_text})
+            wants_summary = self._wants_summary(request.raw_text)
+            summary = self._summarize_text(content, str(resolved_file)) if wants_summary else "File read succeeded."
             return SamResult(
                 status="success",
-                summary="File read succeeded.",
+                summary=summary,
                 next_action="stop",
                 metadata={
                     "intent": "read_file",
-                    "path": file_result.metadata.get("path", path_text),
+                    "path": file_result.metadata.get("path", str(resolved_file)),
                     "content": content,
                     "chars_returned": file_result.metadata.get("chars_returned", len(content)),
+                    "summary_mode": wants_summary,
                     "source": request.source,
                     "confidence": request.confidence,
                 },
@@ -507,9 +522,16 @@ class IntentRouter:
             if not directory_result.ok:
                 return self._service_result("list_directory", directory_result, metadata={"path": path_text})
             preview = entries[:12]
+            remaining = max(0, len(entries) - len(preview))
+            summary = f"{len(entries)} item(s) in {directory_result.metadata.get('path', path_text)}."
+            if preview:
+                summary += " " + ", ".join(preview)
+                if remaining:
+                    summary += f", and {remaining} more"
+                summary += "."
             return SamResult(
                 status="success",
-                summary="Directory listing succeeded.",
+                summary=summary,
                 next_action="stop",
                 metadata={
                     "intent": "list_directory",
@@ -861,19 +883,42 @@ class IntentRouter:
             return self._request_push_approval(request)
 
         if request.intent == "inspect_repo":
+            query = self._query_or_path_from_request(request)
+            if not query:
+                return SamResult(
+                    status="success",
+                    summary="I can inspect a repo, but I need the project path or registered project name first.",
+                    next_action="ask_user",
+                    metadata={
+                        "intent": "inspect_repo",
+                        "source": request.source,
+                        "confidence": request.confidence,
+                    },
+                )
+            inspect_result, inspection = self.project_inspector.inspect(query)
+            if not inspect_result.ok or inspection is None:
+                return self._service_result("inspect_repo", inspect_result, metadata={"query": query})
+            metadata = inspection_metadata(inspection)
+            metadata["intent"] = "inspect_repo"
+            metadata["source"] = request.source
+            metadata["confidence"] = request.confidence
+            changed_summary = (
+                "clean working tree"
+                if inspection.is_clean
+                else f"{len(inspection.changed_files)} changed file(s)"
+            )
             return SamResult(
                 status="success",
-                summary="I can inspect a repo, but I need the project path or registered project name first.",
-                next_action="ask_user",
-                metadata={
-                    "intent": "inspect_repo",
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
+                summary=(
+                    f"{inspection.name} is on branch {inspection.branch or 'unknown'} with a "
+                    f"{changed_summary}."
+                ),
+                next_action="stop",
+                metadata=metadata,
             )
 
         if request.intent == "inspect_project_repo":
-            query = str(request.parameters.get("query", "")).strip()
+            query = self._query_or_path_from_request(request)
             if not query:
                 return SamResult(
                     status="failed",
@@ -906,7 +951,7 @@ class IntentRouter:
             )
 
         if request.intent == "inspect_git_state":
-            query = str(request.parameters.get("query", "")).strip()
+            query = self._query_or_path_from_request(request)
             if not query:
                 return SamResult(
                     status="failed",
@@ -917,19 +962,31 @@ class IntentRouter:
                     metadata={"intent": "inspect_git_state", "source": request.source},
                 )
             project_result, project = self.project_registry.find_project(query)
-            if not project_result.ok or project is None:
-                return self._service_result("inspect_git_state", project_result, metadata={"query": query})
-            git_result, snapshot = self.project_inspector.tools.inspect_git_state(project.root_path)
+            project_id = ""
+            project_name = ""
+            repo_path = query
+            if project_result.ok and project is not None:
+                project_id = project.project_id
+                project_name = project.name
+                repo_path = project.root_path
+            else:
+                directory_result, directory = self.project_inspector.tools.resolve_directory_query(query)
+                if not directory_result.ok or directory is None:
+                    return self._service_result("inspect_git_state", project_result, metadata={"query": query})
+                project_name = directory.name
+                repo_path = str(directory)
+
+            git_result, snapshot = self.project_inspector.tools.inspect_git_state(repo_path)
             if not git_result.ok or snapshot is None:
                 return self._service_result("inspect_git_state", git_result, metadata={"query": query})
             return SamResult(
                 status="success",
-                summary=f"Git state for {project.name}: branch {snapshot.branch}, clean={snapshot.is_clean}.",
+                summary=f"Git state for {project_name}: branch {snapshot.branch}, clean={snapshot.is_clean}.",
                 next_action="stop",
                 metadata={
                     "intent": "inspect_git_state",
-                    "project_id": project.project_id,
-                    "name": project.name,
+                    "project_id": project_id,
+                    "name": project_name,
                     "repo_root": snapshot.repo_root,
                     "branch": snapshot.branch,
                     "is_clean": snapshot.is_clean,
@@ -942,17 +999,101 @@ class IntentRouter:
                 },
             )
 
-        if request.intent == "plan_request":
-            return SamResult(
-                status="success",
-                summary="I can help with that, but I need the project name or the specific issue first.",
-                next_action="ask_user",
-                metadata={
-                    "intent": "plan_request",
+        if request.intent == "scan_codebase_patterns":
+            query = self._query_or_path_from_request(request)
+            root_result, root = self._resolve_project_or_directory(query, memory_block)
+            if not root_result.ok or root is None:
+                return self._service_result("scan_codebase_patterns", root_result, metadata={"query": query})
+            patterns = self._patterns_from_request(request)
+            if not patterns:
+                return SamResult(
+                    status="success",
+                    summary="Which exact text patterns should I scan for?",
+                    next_action="ask_user",
+                    metadata={"intent": "scan_codebase_patterns", "root_path": str(root), "source": request.source},
+                )
+            scan_result, report = CodebaseCleanupService(root).inspect(patterns)
+            metadata = dict(scan_result.metadata)
+            metadata.update(
+                {
+                    "intent": "scan_codebase_patterns",
+                    "root_path": str(root),
+                    "patterns": patterns,
                     "source": request.source,
                     "confidence": request.confidence,
-                },
+                }
             )
+            sample = report.matches[:10]
+            if scan_result.ok:
+                if sample:
+                    preview = "; ".join(
+                        f"{match.path}:{match.line_number} ({match.pattern})"
+                        for match in sample
+                    )
+                    summary = f"Found {len(report.matches)} match(es) for {', '.join(patterns)}. Sample: {preview}."
+                else:
+                    summary = f"No matches found for {', '.join(patterns)}."
+                scan_result.summary = summary
+            scan_result.metadata = metadata
+            return scan_result
+
+        if request.intent == "list_executor_tools":
+            tools = self.tool_executor.list_metadata()
+            names = [item.get("name", "") for item in tools if item.get("name")]
+            preview = ", ".join(names[:20])
+            if len(names) > 20:
+                preview += f", and {len(names) - 20} more"
+            return SamResult(
+                status="success",
+                summary=f"{len(names)} executor tool(s) registered: {preview}.",
+                next_action="stop",
+                metadata={"intent": "list_executor_tools", "tools": tools, "count": len(names)},
+            )
+
+        if request.intent == "list_worker_tasks":
+            tasks = sorted(worker_monitor.list_tasks(), key=lambda item: item.created_at, reverse=True)[:20]
+            task_items = [
+                {
+                    "task_id": task.task_id,
+                    "name": task.name,
+                    "worker_type": task.worker_type,
+                    "worker_name": task.worker_name,
+                    "description": task.description,
+                    "status": task.status,
+                    "elapsed_seconds": task.elapsed_seconds,
+                    "error_message": task.error_message,
+                    "last_output": task.output_lines[-3:],
+                }
+                for task in tasks
+            ]
+            if not task_items:
+                summary = "No worker tasks are currently recorded in this runtime session."
+            else:
+                preview = "; ".join(f"{item['worker_name']}:{item['status']}:{item['name']}" for item in task_items[:8])
+                summary = f"{len(task_items)} recent worker task(s): {preview}."
+            return SamResult(
+                status="success",
+                summary=summary,
+                next_action="stop",
+                metadata={"intent": "list_worker_tasks", "tasks": task_items, "count": len(task_items)},
+            )
+
+        if request.intent == "check_python_syntax":
+            query = self._query_or_path_from_request(request)
+            root_result, root = self._resolve_project_or_directory(query, memory_block)
+            if not root_result.ok or root is None:
+                return self._service_result("check_python_syntax", root_result, metadata={"query": query})
+            return self._check_python_syntax(root, request)
+
+        if request.intent == "inspect_recent_changes":
+            query = self._query_or_path_from_request(request)
+            root_result, root = self._resolve_project_or_directory(query, memory_block)
+            if not root_result.ok or root is None:
+                return self._service_result("inspect_recent_changes", root_result, metadata={"query": query})
+            return self._inspect_recent_changes(root, request)
+
+        if request.intent in {"plan_request", "autonomous_request"}:
+            return self._run_autonomous_loop(request, memory_block)
 
         return SamResult(
             status="success",
@@ -1018,8 +1159,697 @@ class IntentRouter:
         result.metadata.setdefault("execution_steps", len(step_executions))
         result.metadata.setdefault("plan_mode", plan.mode)
         result.metadata.setdefault("request_intent", request.intent)
+        result.metadata.setdefault("intent", request.intent)
         
         return result
+
+    @staticmethod
+    def _query_or_path_from_request(request: IntentRequest) -> str:
+        for key in ("query", "path", "repo_path", "root_path"):
+            value = str(request.parameters.get(key, "")).strip()
+            if value:
+                return value
+
+        match = re.search(r"[A-Za-z]:[\\/][^\r\n\"']+", request.raw_text)
+        if not match:
+            return ""
+
+        candidate = match.group(0).strip().rstrip(".,;")
+        while candidate:
+            path = Path(candidate)
+            if path.exists():
+                return str(path)
+            if " " in candidate:
+                candidate = candidate.rsplit(" ", 1)[0].rstrip(".,;")
+                continue
+            parent = str(path.parent)
+            if parent == candidate:
+                break
+            candidate = parent.rstrip("\\/")
+        return match.group(0).strip().rstrip(".,;")
+
+    def _apply_contextual_request(
+        self,
+        text: str,
+        request: IntentRequest,
+        memory_block: dict[str, Any] | None,
+    ) -> IntentRequest:
+        daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
+        last_file_path = str(daily_state.get("last_file_path", {}).get("value", "")).strip()
+        last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "")).strip()
+
+        if self._wants_summary(text):
+            path = str(request.parameters.get("path", "")).strip()
+            if not path:
+                path = self._path_from_text(text)
+            if not path and last_file_path:
+                path = last_file_path
+            if path:
+                request.intent = "read_file"
+                request.parameters["path"] = path
+                request.source = request.source or "context"
+
+        project_context_intents = {
+            "inspect_repo",
+            "inspect_project_repo",
+            "inspect_git_state",
+            "scan_codebase_patterns",
+            "check_python_syntax",
+            "inspect_recent_changes",
+            "read_file",
+            "list_directory",
+        }
+        if request.intent in project_context_intents and last_project_root:
+            has_location = any(str(request.parameters.get(key, "")).strip() for key in ("query", "path", "repo_path", "root_path"))
+            if not has_location and self._refers_to_current_context(text):
+                key = "path" if request.intent in {"read_file", "list_directory"} else "query"
+                request.parameters[key] = last_project_root
+
+        return request
+
+    @staticmethod
+    def _path_from_text(text: str) -> str:
+        match = re.search(r"[A-Za-z]:[\\/][^\r\n\"']+", text)
+        if not match:
+            return ""
+        candidate = match.group(0).strip().rstrip(".,;")
+        while candidate:
+            path = Path(candidate)
+            if path.exists():
+                return str(path)
+            if " " in candidate:
+                candidate = candidate.rsplit(" ", 1)[0].rstrip(".,;")
+                continue
+            parent = str(path.parent)
+            if parent == candidate:
+                break
+            candidate = parent.rstrip("\\/")
+        return match.group(0).strip().rstrip(".,;")
+
+    @staticmethod
+    def _wants_summary(text: str) -> bool:
+        lowered = text.lower()
+        return any(token in lowered for token in ("summarize", "summary", "summarise", "summarized version", "summarised version"))
+
+    @staticmethod
+    def _summarize_text(content: str, label: str = "file") -> str:
+        normalized = re.sub(r"\s+", " ", content).strip()
+        if not normalized:
+            return f"{Path(label).name} is empty."
+
+        sentences = re.split(r"(?<=[.!?])\s+", normalized)
+        selected = [sentence.strip() for sentence in sentences if sentence.strip()][:4]
+        if not selected:
+            selected = [normalized[:500].strip()]
+        summary = " ".join(selected)
+        if len(summary) > 900:
+            summary = summary[:897].rstrip() + "..."
+        return f"Summary of {Path(label).name}: {summary}"
+
+    @staticmethod
+    def _refers_to_current_context(text: str) -> bool:
+        lowered = text.lower()
+        return any(phrase in lowered for phrase in ("this project", "this repo", "this file", "the project", "the repo", "it", "that project"))
+
+    def _resolve_project_or_directory(
+        self,
+        query: str,
+        memory_block: dict[str, Any] | None,
+    ) -> tuple[SamResult, Path | None]:
+        if query:
+            project_result, project = self.project_registry.find_project(query)
+            if project_result.ok and project is not None:
+                return project_result, Path(project.root_path)
+
+            directory_result, directory = self.project_inspector.tools.resolve_directory_query(query)
+            if directory_result.ok and directory is not None:
+                return directory_result, directory
+
+        daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
+        last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "")).strip()
+        if last_project_root:
+            directory_result, directory = self.project_inspector.tools.resolve_directory_query(last_project_root)
+            if directory_result.ok and directory is not None:
+                return directory_result, directory
+
+        if query:
+            return (
+                SamResult(
+                    status="failed",
+                    summary="Project or directory could not be resolved.",
+                    error_type=ErrorType.FILE_ACCESS_ERROR,
+                    error_message=query,
+                    next_action="ask_user",
+                ),
+                None,
+            )
+
+        return (
+            SamResult(
+                status="failed",
+                summary="I need a project name, repo path, or previous project context first.",
+                error_type=ErrorType.TOOL_FAILED,
+                error_message="missing project context",
+                next_action="ask_user",
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _patterns_from_request(request: IntentRequest) -> list[str]:
+        raw_patterns = request.parameters.get("patterns", [])
+        patterns: list[str] = []
+        if isinstance(raw_patterns, str):
+            patterns = [raw_patterns]
+        elif isinstance(raw_patterns, list):
+            patterns = [str(item) for item in raw_patterns]
+
+        clean = [item.strip().strip("`'\"") for item in patterns if item and item.strip()]
+        if clean:
+            return clean
+
+        text = request.raw_text
+        quoted = re.findall(r"`([^`]+)`|'([^']+)'|\"([^\"]+)\"", text)
+        for groups in quoted:
+            for value in groups:
+                if value.strip():
+                    clean.append(value.strip())
+
+        lowered = text.lower()
+        scan_match = re.search(r"\b(?:for|patterns?)\s+(.+?)(?:\.|$)", text, flags=re.IGNORECASE)
+        if scan_match and "hardcoded project names" not in lowered:
+            fragment = scan_match.group(1)
+            for part in re.split(r",|\band\b", fragment):
+                token = part.strip().strip("`'\"")
+                if token and len(token.split()) <= 4:
+                    clean.append(token)
+
+        return list(dict.fromkeys(item for item in clean if item))
+
+    def _check_python_syntax(self, root: Path, request: IntentRequest) -> SamResult:
+        errors: list[dict[str, object]] = []
+        scanned = 0
+        ignored_parts = {".git", ".venv", "venv", "__pycache__", "node_modules"}
+        for path in root.rglob("*.py"):
+            if any(part in ignored_parts for part in path.parts):
+                continue
+            scanned += 1
+            try:
+                ast.parse(path.read_text(encoding="utf-8", errors="ignore"), filename=str(path))
+            except SyntaxError as exc:
+                errors.append(
+                    {
+                        "path": str(path.relative_to(root)),
+                        "line": exc.lineno,
+                        "message": exc.msg,
+                    }
+                )
+        if errors:
+            preview = "; ".join(f"{item['path']}:{item['line']} {item['message']}" for item in errors[:5])
+            summary = f"Python syntax check found {len(errors)} error(s) across {scanned} file(s): {preview}."
+        else:
+            summary = f"Python syntax check passed for {scanned} file(s)."
+        return SamResult(
+            status="success" if not errors else "failed",
+            summary=summary,
+            next_action="stop" if not errors else "ask_user",
+            metadata={
+                "intent": "check_python_syntax",
+                "root_path": str(root),
+                "files_scanned": scanned,
+                "errors": errors,
+                "source": request.source,
+                "confidence": request.confidence,
+            },
+        )
+
+    def _inspect_recent_changes(self, root: Path, request: IntentRequest) -> SamResult:
+        git_result, snapshot = self.project_inspector.tools.inspect_git_state(root)
+        if not git_result.ok or snapshot is None:
+            return self._service_result("inspect_recent_changes", git_result, metadata={"root_path": str(root)})
+        summary = (
+            f"{root.name} is on branch {snapshot.branch or 'unknown'} with "
+            f"{len(snapshot.changed_files)} changed file(s)."
+        )
+        if snapshot.changed_files:
+            summary += " Changed: " + ", ".join(snapshot.changed_files[:12])
+            if len(snapshot.changed_files) > 12:
+                summary += f", and {len(snapshot.changed_files) - 12} more"
+            summary += "."
+        return SamResult(
+            status="success",
+            summary=summary,
+            next_action="stop",
+            metadata={
+                "intent": "inspect_recent_changes",
+                "root_path": str(root),
+                "branch": snapshot.branch,
+                "is_clean": snapshot.is_clean,
+                "changed_files": snapshot.changed_files,
+                "staged_files": snapshot.staged_files,
+                "unstaged_files": snapshot.unstaged_files,
+                "untracked_files": snapshot.untracked_files,
+                "source": request.source,
+                "confidence": request.confidence,
+            },
+        )
+
+    def _run_autonomous_loop(
+        self,
+        request: IntentRequest,
+        memory_block: dict[str, Any] | None,
+    ) -> SamResult:
+        if not self.model_client.is_available():
+            return SamResult(
+                status="failed",
+                summary="My local reasoning model is unavailable, so I cannot run an autonomous investigation.",
+                error_type=ErrorType.MISSING_CAPABILITY,
+                error_message="llm unavailable",
+                next_action="ask_user",
+                metadata={"intent": request.intent, "source": request.source},
+            )
+
+        tools = self._autonomous_tool_manifest()
+        observations: list[dict[str, Any]] = []
+        tool_trace: list[dict[str, Any]] = []
+
+        for step_index in range(5):
+            try:
+                decision = self.model_client.choose_autonomous_action(
+                    user_text=request.raw_text,
+                    tools=tools,
+                    observations=observations,
+                    memory_block=memory_block,
+                    workspace_root=str(self.workspace_root),
+                )
+            except Exception as exc:
+                if observations:
+                    return self._final_from_observations(request, observations, tool_trace, str(exc))
+                return SamResult(
+                    status="failed",
+                    summary="Autonomous reasoning failed before I could choose a safe tool.",
+                    error_type=ErrorType.TOOL_FAILED,
+                    error_message=str(exc),
+                    next_action="retry",
+                    metadata={"intent": request.intent, "source": request.source},
+                )
+
+            action = str(decision.get("action", "")).lower()
+            if action == "final":
+                answer = str(decision.get("answer", "")).strip() or self._observations_summary(observations)
+                return SamResult(
+                    status="success",
+                    summary=answer,
+                    next_action="stop",
+                    metadata={
+                        "intent": "autonomous_request",
+                        "source": request.source,
+                        "confidence": request.confidence,
+                        "autonomous_steps": len(tool_trace),
+                        "tool_trace": tool_trace,
+                        "observations": observations,
+                    },
+                )
+
+            if action == "ask_user":
+                question = str(decision.get("question", "")).strip() or "I need one more detail before I can continue."
+                return SamResult(
+                    status="success",
+                    summary=question,
+                    next_action="ask_user",
+                    metadata={
+                        "intent": "clarify",
+                        "source": "autonomous_loop",
+                        "autonomous_steps": len(tool_trace),
+                        "tool_trace": tool_trace,
+                        "observations": observations,
+                    },
+                )
+
+            if action != "tool":
+                observations.append({"step": step_index + 1, "status": "failed", "summary": "Model chose an unsupported action."})
+                continue
+
+            tool_name = str(decision.get("tool", "")).strip()
+            arguments = decision.get("arguments", {})
+            if not isinstance(arguments, dict):
+                arguments = {}
+            worker_name, worker_type = self._autonomous_worker_identity(tool_name)
+            task = worker_monitor.create_task(
+                name=f"autonomous_{tool_name or 'unknown'}",
+                worker_type=worker_type,
+                worker_name=worker_name,
+                description=f"Autonomous step {step_index + 1}: {tool_name}",
+            )
+            worker_monitor.mark_running(task.task_id)
+            worker_monitor.append_output(task.task_id, f"Tool: {tool_name}")
+            if arguments:
+                worker_monitor.append_output(task.task_id, f"Arguments: {arguments}")
+            tool_result = self._execute_autonomous_tool(tool_name, arguments, request, memory_block)
+            if tool_result.ok:
+                worker_monitor.append_output(task.task_id, f"Observation: {tool_result.summary}")
+                worker_monitor.mark_done(task.task_id)
+            else:
+                worker_monitor.append_output(task.task_id, f"Failure: {tool_result.error_message or tool_result.summary}")
+                worker_monitor.mark_failed(task.task_id, tool_result.error_message or tool_result.summary)
+            observation = self._compact_result(tool_name, arguments, tool_result, step_index + 1)
+            observations.append(observation)
+            tool_trace.append(
+                {
+                    "step": step_index + 1,
+                    "tool": tool_name,
+                    "worker_name": worker_name,
+                    "worker_type": worker_type,
+                    "arguments": arguments,
+                    "status": tool_result.status,
+                    "summary": tool_result.summary,
+                }
+            )
+
+            if tool_result.next_action == "ask_user" and not tool_result.ok:
+                return SamResult(
+                    status="success",
+                    summary=tool_result.summary,
+                    next_action="ask_user",
+                    metadata={
+                        "intent": "clarify",
+                        "source": "autonomous_loop",
+                        "autonomous_steps": len(tool_trace),
+                        "tool_trace": tool_trace,
+                        "observations": observations,
+                    },
+                )
+
+        return self._final_from_observations(request, observations, tool_trace, "")
+
+    def _execute_autonomous_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        parent_request: IntentRequest,
+        memory_block: dict[str, Any] | None,
+    ) -> SamResult:
+        allowed_tools = {item["name"] for item in self._autonomous_tool_manifest()}
+        if tool_name not in allowed_tools:
+            return SamResult(
+                status="failed",
+                summary=f"Tool {tool_name} is not available to the autonomous read-only loop.",
+                error_type=ErrorType.MISSING_CAPABILITY,
+                error_message=tool_name,
+                next_action="ask_user",
+                metadata={"intent": "autonomous_request"},
+            )
+
+        child = IntentRequest(
+            intent=tool_name,
+            parameters=dict(arguments),
+            raw_text=parent_request.raw_text,
+            confidence=parent_request.confidence,
+            source="autonomous_loop",
+        )
+
+        if tool_name == "capabilities":
+            result = self.awareness.describe_self()
+            result.metadata.setdefault("intent", "capabilities")
+            return result
+        if tool_name == "list_projects":
+            project_result, projects = self.project_registry.list_projects()
+            if not project_result.ok:
+                return self._service_result("list_projects", project_result)
+            names = [project.name for project in projects]
+            return SamResult(
+                status="success",
+                summary=f"I know about {len(names)} project(s): {', '.join(names)}.",
+                next_action="stop",
+                metadata={"intent": "list_projects", "count": len(names), "projects": names},
+            )
+        if tool_name == "list_executor_tools":
+            tools = self.tool_executor.list_metadata()
+            return SamResult(
+                status="success",
+                summary=f"{len(tools)} executor tool(s) registered.",
+                next_action="stop",
+                metadata={"intent": "list_executor_tools", "tools": tools, "count": len(tools)},
+            )
+        if tool_name == "list_worker_tasks":
+            tasks = sorted(worker_monitor.list_tasks(), key=lambda item: item.created_at, reverse=True)[:20]
+            return SamResult(
+                status="success",
+                summary=f"{len(tasks)} recent worker task(s) found.",
+                next_action="stop",
+                metadata={
+                    "intent": "list_worker_tasks",
+                    "tasks": [
+                        {
+                            "task_id": task.task_id,
+                            "name": task.name,
+                            "worker_name": task.worker_name,
+                            "status": task.status,
+                            "description": task.description,
+                            "last_output": task.output_lines[-3:],
+                        }
+                        for task in tasks
+                    ],
+                },
+            )
+        if tool_name == "read_file":
+            path = str(arguments.get("path", "")).strip()
+            if not path:
+                return SamResult(
+                    status="failed",
+                    summary="File path is required.",
+                    error_type=ErrorType.TOOL_FAILED,
+                    error_message="missing path",
+                    next_action="ask_user",
+                    metadata={"intent": "read_file"},
+                )
+            additional_roots = self._memory_roots(memory_block)
+            resolve_result, resolved = self.project_inspector.tools.resolve_file_query(path, additional_roots=additional_roots)
+            if not resolve_result.ok or resolved is None:
+                return self._service_result("read_file", resolve_result, metadata={"path": path})
+            max_chars = int(arguments.get("max_chars", 6000) or 6000)
+            file_result, content = self.project_inspector.tools.read_text_file(resolved, max_chars=max_chars)
+            if file_result.ok and content is not None:
+                file_result.metadata["content"] = content
+                file_result.metadata.setdefault("intent", "read_file")
+            return file_result
+        if tool_name == "list_directory":
+            path = str(arguments.get("path", "") or arguments.get("query", "")).strip()
+            root_result, root = self._resolve_project_or_directory(path, memory_block)
+            if not root_result.ok or root is None:
+                return self._service_result("list_directory", root_result, metadata={"path": path})
+            directory_result, entries = self.project_inspector.tools.list_directory(root)
+            if directory_result.ok:
+                directory_result.metadata.update({"intent": "list_directory", "entries": entries[:100]})
+            return directory_result
+        if tool_name in {"inspect_repo", "inspect_project_repo"}:
+            query = str(arguments.get("query", "") or arguments.get("path", "")).strip()
+            root_result, root = self._resolve_project_or_directory(query, memory_block)
+            if not root_result.ok or root is None:
+                return self._service_result(tool_name, root_result, metadata={"query": query})
+            inspect_result, inspection = self.project_inspector.inspect(str(root))
+            if not inspect_result.ok or inspection is None:
+                return self._service_result(tool_name, inspect_result, metadata={"query": str(root)})
+            metadata = inspection_metadata(inspection)
+            metadata["intent"] = tool_name
+            return SamResult(
+                status="success",
+                summary=f"{inspection.name} is on branch {inspection.branch or 'unknown'} with {len(inspection.changed_files)} changed file(s).",
+                next_action="stop",
+                metadata=metadata,
+            )
+        if tool_name == "inspect_git_state":
+            query = str(arguments.get("query", "") or arguments.get("repo_path", "") or arguments.get("path", "")).strip()
+            root_result, root = self._resolve_project_or_directory(query, memory_block)
+            if not root_result.ok or root is None:
+                return self._service_result("inspect_git_state", root_result, metadata={"query": query})
+            git_result, snapshot = self.project_inspector.tools.inspect_git_state(root)
+            if git_result.ok and snapshot is not None:
+                git_result.metadata.update(
+                    {
+                        "intent": "inspect_git_state",
+                        "repo_root": snapshot.repo_root,
+                        "branch": snapshot.branch,
+                        "is_clean": snapshot.is_clean,
+                        "changed_files": snapshot.changed_files,
+                        "staged_files": snapshot.staged_files,
+                        "unstaged_files": snapshot.unstaged_files,
+                        "untracked_files": snapshot.untracked_files,
+                    }
+                )
+            return git_result
+        if tool_name == "scan_codebase_patterns":
+            query = str(arguments.get("query", "") or arguments.get("path", "")).strip()
+            root_result, root = self._resolve_project_or_directory(query, memory_block)
+            if not root_result.ok or root is None:
+                return self._service_result("scan_codebase_patterns", root_result, metadata={"query": query})
+            patterns = arguments.get("patterns", [])
+            if isinstance(patterns, str):
+                patterns = [patterns]
+            patterns = [str(item).strip() for item in patterns if str(item).strip()]
+            if not patterns:
+                patterns = self._patterns_from_request(parent_request)
+            if not patterns:
+                return SamResult(
+                    status="failed",
+                    summary="Search patterns are required.",
+                    error_type=ErrorType.TOOL_FAILED,
+                    error_message="missing patterns",
+                    next_action="ask_user",
+                    metadata={"intent": "scan_codebase_patterns", "root_path": str(root)},
+                )
+            scan_result, report = CodebaseCleanupService(root).inspect(patterns)
+            scan_result.metadata.update(
+                {
+                    "intent": "scan_codebase_patterns",
+                    "root_path": str(root),
+                    "patterns": patterns,
+                    "matches": [match.__dict__ for match in report.matches[:100]],
+                    "match_count": len(report.matches),
+                }
+            )
+            return scan_result
+        if tool_name == "check_python_syntax":
+            query = str(arguments.get("query", "") or arguments.get("path", "")).strip()
+            root_result, root = self._resolve_project_or_directory(query, memory_block)
+            if not root_result.ok or root is None:
+                return self._service_result("check_python_syntax", root_result, metadata={"query": query})
+            return self._check_python_syntax(root, child)
+        if tool_name == "inspect_recent_changes":
+            query = str(arguments.get("query", "") or arguments.get("path", "")).strip()
+            root_result, root = self._resolve_project_or_directory(query, memory_block)
+            if not root_result.ok or root is None:
+                return self._service_result("inspect_recent_changes", root_result, metadata={"query": query})
+            return self._inspect_recent_changes(root, child)
+        if tool_name == "inspect_workspace_cleanup":
+            scope = str(arguments.get("scope", "all") or "all")
+            result, _metadata = self.workspace_cleanup.inspect(scope)
+            result.metadata.setdefault("intent", "inspect_workspace_cleanup")
+            return result
+
+        return SamResult(
+            status="failed",
+            summary=f"Autonomous tool {tool_name} is not implemented.",
+            error_type=ErrorType.MISSING_CAPABILITY,
+            error_message=tool_name,
+            next_action="ask_user",
+            metadata={"intent": "autonomous_request"},
+        )
+
+    def _autonomous_tool_manifest(self) -> list[dict[str, Any]]:
+        return [
+            {"name": "capabilities", "description": "List available Sam capabilities.", "arguments": {}},
+            {"name": "list_projects", "description": "List registered projects.", "arguments": {}},
+            {"name": "read_file", "description": "Read a UTF-8 text file.", "arguments": {"path": "file path or name", "max_chars": 6000}},
+            {"name": "list_directory", "description": "List files in a directory.", "arguments": {"path": "directory path or project path"}},
+            {"name": "inspect_repo", "description": "Inspect repo branch, working tree, and top-level files.", "arguments": {"query": "project name or path"}},
+            {"name": "inspect_git_state", "description": "Inspect git branch and changed files.", "arguments": {"query": "project name or path"}},
+            {"name": "scan_codebase_patterns", "description": "Scan codebase for exact text patterns.", "arguments": {"query": "project name or path", "patterns": ["text"]}},
+            {"name": "check_python_syntax", "description": "Parse Python files and report syntax errors.", "arguments": {"query": "project name or path"}},
+            {"name": "inspect_recent_changes", "description": "Summarize current git working-tree changes.", "arguments": {"query": "project name or path"}},
+            {"name": "inspect_workspace_cleanup", "description": "Inspect duplicate cleanup candidates without deleting.", "arguments": {"scope": "all|projects|runtime"}},
+            {"name": "list_executor_tools", "description": "List registered executor tools.", "arguments": {}},
+            {"name": "list_worker_tasks", "description": "List running and recent worker tasks.", "arguments": {}},
+        ]
+
+    @staticmethod
+    def _autonomous_worker_identity(tool_name: str) -> tuple[str, str]:
+        normalized = tool_name.lower()
+        if any(token in normalized for token in ("scan", "inspect", "read", "list")):
+            return "Inspector", "inspect"
+        if any(token in normalized for token in ("syntax", "compile", "health", "test")):
+            return "Nigel", "test"
+        if "recent_changes" in normalized or "git" in normalized:
+            return "Auditor", "inspect"
+        return "Coordinator", "planning"
+
+    @staticmethod
+    def _memory_roots(memory_block: dict[str, Any] | None) -> list[str]:
+        daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
+        roots = []
+        for key in ("last_project_root_path", "last_file_path"):
+            value = str(daily_state.get(key, {}).get("value", "")).strip()
+            if value:
+                roots.append(str(Path(value).parent if key == "last_file_path" else Path(value)))
+        return roots
+
+    @staticmethod
+    def _compact_result(
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: SamResult,
+        step: int,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        for key in (
+            "intent",
+            "path",
+            "root_path",
+            "repo_root",
+            "branch",
+            "is_clean",
+            "changed_files",
+            "entries",
+            "entry_count",
+            "patterns",
+            "match_count",
+            "matches",
+            "errors",
+            "files_scanned",
+            "tasks",
+            "tools",
+            "projects",
+            "content",
+        ):
+            if key in result.metadata:
+                value = result.metadata[key]
+                if key == "content" and isinstance(value, str):
+                    value = value[:4000]
+                elif isinstance(value, list):
+                    value = value[:25]
+                metadata[key] = value
+        return {
+            "step": step,
+            "tool": tool_name,
+            "arguments": arguments,
+            "status": result.status,
+            "summary": result.summary,
+            "error": result.error_message,
+            "metadata": metadata,
+        }
+
+    def _final_from_observations(
+        self,
+        request: IntentRequest,
+        observations: list[dict[str, Any]],
+        tool_trace: list[dict[str, Any]],
+        reason: str,
+    ) -> SamResult:
+        summary = self._observations_summary(observations)
+        if reason:
+            summary += f" I stopped after observation because final synthesis failed: {reason}"
+        return SamResult(
+            status="success" if observations else "failed",
+            summary=summary,
+            error_type=None if observations else ErrorType.TOOL_FAILED,
+            error_message=reason or None,
+            next_action="stop" if observations else "retry",
+            metadata={
+                "intent": "autonomous_request",
+                "source": request.source,
+                "confidence": request.confidence,
+                "autonomous_steps": len(tool_trace),
+                "tool_trace": tool_trace,
+                "observations": observations,
+            },
+        )
+
+    @staticmethod
+    def _observations_summary(observations: list[dict[str, Any]]) -> str:
+        if not observations:
+            return "I could not gather enough observations to answer."
+        lines = [str(item.get("summary", "")).strip() for item in observations if str(item.get("summary", "")).strip()]
+        return " ".join(lines[-3:]) or "I gathered observations, but they did not include a clear answer."
 
 
     def _parse_with_llm(self, text: str, memory_block: dict[str, Any] | None = None) -> IntentRequest | None:

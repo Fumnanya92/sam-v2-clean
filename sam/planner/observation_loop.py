@@ -88,12 +88,16 @@ class ObservationLoop:
         if plan.mode == "direct" or plan.multi_step_plan is None:
             result = self._execute_single_step(plan, memory_block)
             final_summary = result.summary if hasattr(result, 'summary') else str(result)
+            metadata = dict(result.metadata) if isinstance(result, SamResult) else {}
+            metadata["execution_mode"] = "direct"
             return (
                 SamResult(
                     status="success" if result.ok else "failed",
                     summary=final_summary,
-                    next_action="stop",
-                    metadata={"execution_mode": "direct"},
+                    error_type=result.error_type if isinstance(result, SamResult) else None,
+                    error_message=result.error_message if isinstance(result, SamResult) else None,
+                    next_action=result.next_action if isinstance(result, SamResult) else "stop",
+                    metadata=metadata,
                 ),
                 [],
             )

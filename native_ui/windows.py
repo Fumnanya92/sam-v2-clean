@@ -8,12 +8,15 @@ Panels use angled clip-path corners for a HUD feel, not generic rounded rects.
 
 from __future__ import annotations
 
+import html
 import math
 import random
+import re
 from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtCore import (
-    QPoint, QRect, QRectF, Qt,
+    QPoint, QRect, QRectF, Qt, QUrl,
     QPropertyAnimation, QEasingCurve, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -22,7 +25,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QPlainTextEdit, QScrollArea,
+    QPushButton, QTextBrowser, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
@@ -31,11 +34,11 @@ from PyQt6.QtWidgets import (
 # ══════════════════════════════════════════════════════════════════════════════
 
 # colours
-_V     = "rgba(2, 6, 14, 255)"          # void — deepest bg
-_PANEL = "rgba(4, 11, 24, 252)"         # panel bg
-_CARD  = "rgba(6, 16, 34, 245)"         # card / bubble bg
-_INPUT = "rgba(5, 13, 28, 248)"         # input field bg
-_HOVER = "rgba(10, 28, 52, 230)"        # hover state
+_V     = "#02060e"                       # void — deepest bg
+_PANEL = "#040b18"                       # panel bg
+_CARD  = "#061022"                       # card / bubble bg
+_INPUT = "#050d1c"                       # input field bg
+_HOVER = "#0a1c34"                       # hover state
 
 _CYN   = "#48c8f0"                       # cyan accent (you-messages, borders, orb)
 _AMB   = "#f0c040"                       # amber (Sam messages, working state)
@@ -43,25 +46,25 @@ _MINT  = "#38f8c0"                       # mint (success / listening)
 _RED   = "#f06060"                       # error / danger
 _VIO   = "#a080f8"                       # violet (music)
 
-_B0    = "rgba(72, 200, 240, 0.08)"     # border ghost
-_B1    = "rgba(72, 200, 240, 0.18)"     # border dim
-_B2    = "rgba(72, 200, 240, 0.32)"     # border lit
+_B0    = "#173342"                       # border ghost
+_B1    = "#214a5c"                       # border dim
+_B2    = "#32758f"                       # border lit
 
 _TX    = "#d8f8ff"                       # primary text
-_TXD   = "rgba(200, 240, 255, 0.54)"    # muted text
-_TXG   = "rgba(120, 200, 230, 0.36)"    # ghost text
+_TXD   = "#86a7b3"                       # muted text
+_TXG   = "#527f91"                       # ghost text
 
 # state chip backgrounds
 _SBG = {
-    "idle":           "rgba(24, 90, 128, 0.55)",
-    "ready":          "rgba(12, 90, 60,  0.55)",
-    "listening":      "rgba(12, 104, 76, 0.58)",
-    "thinking":       "rgba(100, 64,  6, 0.60)",
-    "working":        "rgba(6,   60, 118, 0.60)",
-    "needs_approval": "rgba(118, 58,  6, 0.68)",
-    "failed":         "rgba(100, 14, 14, 0.65)",
-    "done":           "rgba(12,  82, 48, 0.58)",
-    "success":        "rgba(12,  82, 48, 0.58)",
+    "idle":           "#185a80",
+    "ready":          "#0c5a3c",
+    "listening":      "#0c684c",
+    "thinking":       "#644006",
+    "working":        "#063c76",
+    "needs_approval": "#763a06",
+    "failed":         "#640e0e",
+    "done":           "#0c5230",
+    "success":        "#0c5230",
 }
 
 # popup types
@@ -110,6 +113,22 @@ def _f_ui(size: int = 11, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
     return QFont("Segoe UI", size, weight)
 
 
+_PATH_RE = re.compile(r"(?P<path>[A-Za-z]:[\\/][^\s<>'\"]+)")
+
+
+def _linkify(text: str) -> str:
+    escaped = html.escape(text)
+
+    def repl(match: re.Match[str]) -> str:
+        raw = match.group("path").rstrip(".,;:)")
+        suffix = match.group("path")[len(raw):]
+        href = QUrl.fromLocalFile(raw).toString()
+        label = html.escape(raw)
+        return f'<a href="{html.escape(href)}">{label}</a>{html.escape(suffix)}'
+
+    return _PATH_RE.sub(repl, escaped).replace("\n", "<br>")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  WIDGET PRIMITIVES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -119,7 +138,7 @@ def _chip(text: str, state: str = "idle") -> QLabel:
     bg  = _SBG.get(state.lower(), _SBG["idle"])
     lbl.setFont(_f_ui(8, QFont.Weight.Medium))
     lbl.setStyleSheet(
-        f"color: {_CYN}; font-size: 9px; letter-spacing: 1.8px;"
+        f"color: {_CYN}; font-size: 9px;"
         f" background: {bg}; padding: 3px 10px; border-radius: 3px;"
     )
     return lbl
@@ -131,16 +150,16 @@ def _btn(text: str, accent: str = _CYN, danger: bool = False) -> QPushButton:
     b.setFont(_f_ui(10, QFont.Weight.Medium))
     if danger:
         b.setStyleSheet(
-            f"QPushButton {{ background: rgba(80,18,24,0.92); color: {_RED};"
-            "  border: 1px solid rgba(160,40,56,0.30); border-radius: 4px;"
-            "  padding: 6px 14px; letter-spacing: 1px; }}"
-            "QPushButton:hover { background: rgba(110,24,34,0.96); }"
+            f"QPushButton {{ background: #501218; color: {_RED};"
+            "  border: 1px solid #78303a; border-radius: 4px;"
+            "  padding: 6px 14px; }"
+            "QPushButton:hover { background: #6e1822; }"
         )
     else:
         b.setStyleSheet(
             f"QPushButton {{ background: {_CARD}; color: {_TX};"
             f"  border: 1px solid {_B1}; border-radius: 4px;"
-            f"  padding: 6px 14px; letter-spacing: 1px; }}"
+            f"  padding: 6px 14px; }}"
             f"QPushButton:hover {{ background: {_HOVER}; border-color: {accent};"
             f"  color: {accent}; }}"
         )
@@ -194,14 +213,14 @@ class IdleSceneWindow(QWidget):
         self._lbl_time.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_time.setFont(_f_brand(62))
         self._lbl_time.setStyleSheet(
-            f"color: {_TX}; letter-spacing: 6px; background: transparent;"
+            f"color: {_TX}; background: transparent;"
         )
 
         self._lbl_date = QLabel(self._date_str())
         self._lbl_date.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_date.setFont(_f_ui(13))
         self._lbl_date.setStyleSheet(
-            f"color: {_TXD}; letter-spacing: 3px; background: transparent;"
+            f"color: {_TXD}; background: transparent;"
         )
 
         sep = QLabel("· · ·")
@@ -212,21 +231,21 @@ class IdleSceneWindow(QWidget):
         self._lbl_brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_brand.setFont(_f_brand(38))
         self._lbl_brand.setStyleSheet(
-            f"color: {_CYN}; letter-spacing: 14px; background: transparent;"
+            f"color: {_CYN}; background: transparent;"
         )
 
         self._lbl_sub = QLabel("AUTONOMOUS PERSONAL ASSISTANT  ·  STANDBY")
         self._lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_sub.setFont(_f_ui(10))
         self._lbl_sub.setStyleSheet(
-            f"color: {_TXD}; letter-spacing: 3.5px; background: transparent;"
+            f"color: {_TXD}; background: transparent;"
         )
 
         self._lbl_hint = QLabel("CLICK ANYWHERE OR TAP THE ORB TO ACTIVATE")
         self._lbl_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_hint.setFont(_f_ui(8))
         self._lbl_hint.setStyleSheet(
-            f"color: {_TXG}; letter-spacing: 2px; background: transparent;"
+            f"color: {_TXG}; background: transparent;"
         )
 
         for w in (self._lbl_time, self._lbl_date, sep, self._lbl_brand,
@@ -341,7 +360,7 @@ class _YouBubble(QFrame):
         meta = QLabel(f"YOU  {ts}")
         meta.setFont(_f_ui(8))
         meta.setAlignment(Qt.AlignmentFlag.AlignRight)
-        meta.setStyleSheet(f"color: {_TXG}; letter-spacing: 1.5px; background: transparent;")
+        meta.setStyleSheet(f"color: {_TXG}; background: transparent;")
 
         body = QLabel(text)
         body.setWordWrap(True)
@@ -354,10 +373,9 @@ class _YouBubble(QFrame):
         layout.addWidget(body)
 
         self.setStyleSheet(
-            f"QFrame {{ background: rgba(8,28,52,0.70);"
-            f" border: 1px solid {_B1};"
-            f" border-left: 3px solid {_CYN};"
-            " border-radius: 0px 10px 10px 0px; }}"
+            f"QFrame {{ background: #081c34;"
+            f" border: 1px solid {_CYN};"
+            " border-radius: 8px; }"
         )
 
 
@@ -372,22 +390,24 @@ class _SamBubble(QFrame):
 
         meta = QLabel(f"SAM  {ts}")
         meta.setFont(_f_ui(8))
-        meta.setStyleSheet(f"color: rgba(240,192,64,0.52); letter-spacing: 1.5px; background: transparent;")
+        meta.setStyleSheet("color: #a58635; background: transparent;")
 
         body = QLabel(text)
         body.setWordWrap(True)
         body.setFont(_f_mono(12))
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setOpenExternalLinks(False)
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        body.setStyleSheet(f"color: rgba(255, 236, 180, 0.95); background: transparent;")
+        body.setText(_linkify(text))
+        body.setStyleSheet("color: #ffecb4; background: transparent;")
 
         layout.addWidget(meta)
         layout.addWidget(body)
 
         self.setStyleSheet(
-            "QFrame { background: rgba(28, 20, 6, 0.72);"
-            f" border: 1px solid rgba(240, 192, 64, 0.16);"
-            f" border-top: 2px solid rgba(240, 192, 64, 0.42);"
-            " border-radius: 10px 0px 10px 10px; }"
+            "QFrame { background: #1c1406;"
+            f" border: 1px solid #9a7b29;"
+            " border-radius: 8px; }"
         )
 
 
@@ -395,6 +415,7 @@ class DashboardWindow(QWidget):
     submitted       = pyqtSignal(str)
     idle_requested  = pyqtSignal()
     close_requested = pyqtSignal()
+    path_clicked    = pyqtSignal(str)
 
     _W, _H = 460, 720
 
@@ -427,7 +448,7 @@ class DashboardWindow(QWidget):
         header = QFrame()
         header.setFixedHeight(52)
         header.setStyleSheet(
-            f"QFrame {{ background: rgba(3, 9, 20, 255);"
+            f"QFrame {{ background: #030914;"
             f" border-bottom: 1px solid {_B1}; border-radius: 0px; }}"
         )
         hlay = QHBoxLayout(header)
@@ -445,7 +466,7 @@ class DashboardWindow(QWidget):
 
         brand = QLabel("SAM")
         brand.setFont(_f_brand(16))
-        brand.setStyleSheet(f"color: {_CYN}; letter-spacing: 8px; background: transparent;")
+        brand.setStyleSheet(f"color: {_CYN}; background: transparent;")
         hlay.addWidget(brand)
         hlay.addStretch()
 
@@ -466,7 +487,7 @@ class DashboardWindow(QWidget):
         self._scroll.setStyleSheet(
             f"QScrollArea {{ background: transparent; border: none; }}"
             f"QScrollBar:vertical {{ background: {_V}; width: 3px; }}"
-            f"QScrollBar::handle:vertical {{ background: rgba(72,200,240,0.28); border-radius: 1px; }}"
+            f"QScrollBar::handle:vertical {{ background: #2b7892; border-radius: 1px; }}"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         )
         self._cw = QWidget()
@@ -481,7 +502,7 @@ class DashboardWindow(QWidget):
         # ── input area ────────────────────────────────────────────────────────
         inp_frame = QFrame()
         inp_frame.setStyleSheet(
-            f"QFrame {{ background: rgba(3, 9, 20, 255);"
+            f"QFrame {{ background: #030914;"
             f" border-top: 1px solid {_B1}; border-radius: 0px; }}"
         )
         inp_lay = QVBoxLayout(inp_frame)
@@ -538,7 +559,7 @@ class DashboardWindow(QWidget):
         bg  = _SBG.get(key, _SBG["idle"])
         self._state_chip.setText(state.upper())
         self._state_chip.setStyleSheet(
-            f"color: {_CYN}; font-size: 9px; letter-spacing: 1.8px;"
+            f"color: {_CYN}; font-size: 9px;"
             f" background: {bg}; padding: 3px 10px; border-radius: 3px;"
         )
 
@@ -546,6 +567,8 @@ class DashboardWindow(QWidget):
         ts = datetime.now().strftime("%H:%M")
         if speaker.lower() == "sam":
             bubble = _SamBubble(text, ts)
+            for label in bubble.findChildren(QLabel):
+                label.linkActivated.connect(self._emit_path)
         else:
             bubble = _YouBubble(text, ts)
         n = self._cl.count()
@@ -572,6 +595,13 @@ class DashboardWindow(QWidget):
     def _end(self) -> None:
         sb = self._scroll.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    def _emit_path(self, href: str) -> None:
+        url = QUrl(href)
+        if url.isLocalFile():
+            self.path_clicked.emit(url.toLocalFile())
+        else:
+            self.path_clicked.emit(href)
 
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton:
@@ -604,6 +634,7 @@ class TaskPopupWindow(QWidget):
         set_title / set_status / append_line
     """
     close_requested = pyqtSignal()
+    path_clicked = pyqtSignal(str)
 
     _W, _H = 450, 278
 
@@ -626,7 +657,7 @@ class TaskPopupWindow(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         self._panel = QFrame()
         self._panel.setStyleSheet(
-            f"QFrame {{ background: rgba(2, 8, 18, 252);"
+            f"QFrame {{ background: #020812;"
             f" border: 1px solid {_B2}; border-radius: 6px; }}"
         )
         outer.addWidget(self._panel)
@@ -639,7 +670,7 @@ class TaskPopupWindow(QWidget):
         hdr_frame = QFrame()
         hdr_frame.setFixedHeight(44)
         hdr_frame.setStyleSheet(
-            "QFrame { background: rgba(2, 6, 14, 255);"
+            "QFrame { background: #02060e;"
             f" border-bottom: 1px solid {_B1}; border-radius: 0px; }}"
         )
         hlay = QHBoxLayout(hdr_frame)
@@ -653,7 +684,7 @@ class TaskPopupWindow(QWidget):
 
         self.title_label = QLabel("No active task")
         self.title_label.setFont(_f_brand(12))
-        self.title_label.setStyleSheet(f"color: {_TX}; letter-spacing: 1px; background: transparent;")
+        self.title_label.setStyleSheet(f"color: {_TX}; background: transparent;")
         hlay.addWidget(self.title_label, 1)
 
         self.status_chip = _chip("IDLE", "idle")
@@ -677,14 +708,17 @@ class TaskPopupWindow(QWidget):
         root.addWidget(self._rail)
 
         # body log
-        self.body_view = QPlainTextEdit()
+        self.body_view = QTextBrowser()
         self.body_view.setReadOnly(True)
+        self.body_view.setOpenExternalLinks(False)
+        self.body_view.anchorClicked.connect(self._anchor_clicked)
         self.body_view.setFont(_f_mono(11))
         self.body_view.setStyleSheet(
-            f"QPlainTextEdit {{ background: transparent; color: {_TXD};"
+            f"QTextBrowser {{ background: transparent; color: {_TXD};"
             " border: none; padding: 12px 16px; }"
+            f"QTextBrowser a {{ color: {_CYN}; text-decoration: underline; }}"
             "QScrollBar:vertical { background: transparent; width: 2px; }"
-            "QScrollBar::handle:vertical { background: rgba(72,200,240,0.22); }"
+            "QScrollBar::handle:vertical { background: #26677d; }"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         )
         root.addWidget(self.body_view, 1)
@@ -722,7 +756,7 @@ class TaskPopupWindow(QWidget):
     def set_task(self, title: str, status: str, lines: list[str]) -> None:
         self.title_label.setText(title)
         self.set_status(status)
-        self.body_view.setPlainText("\n".join(lines).strip())
+        self.body_view.setHtml(_linkify("\n".join(lines).strip()))
 
     def set_title(self, title: str) -> None:
         self.title_label.setText(title)
@@ -732,7 +766,7 @@ class TaskPopupWindow(QWidget):
         bg  = _SBG.get(key, _SBG["idle"])
         self.status_chip.setText(status.upper())
         self.status_chip.setStyleSheet(
-            f"color: {_CYN}; font-size: 9px; letter-spacing: 1.8px;"
+            f"color: {_CYN}; font-size: 9px;"
             f" background: {bg}; padding: 3px 10px; border-radius: 3px;"
         )
         active = key in ("working", "thinking")
@@ -743,9 +777,16 @@ class TaskPopupWindow(QWidget):
 
     def append_line(self, line: str) -> None:
         txt = self.body_view.toPlainText().strip()
-        self.body_view.setPlainText(f"{txt}\n{line}".strip() if txt else line)
+        combined = f"{txt}\n{line}".strip() if txt else line
+        self.body_view.setHtml(_linkify(combined))
         sb = self.body_view.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    def _anchor_clicked(self, url: QUrl) -> None:
+        if url.isLocalFile():
+            self.path_clicked.emit(url.toLocalFile())
+        else:
+            self.path_clicked.emit(url.toString())
 
     def animate_to(self, target: QRect) -> None:
         self._anim.stop()

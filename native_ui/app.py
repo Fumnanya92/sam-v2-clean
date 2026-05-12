@@ -69,7 +69,9 @@ class NativeShellController:
         self.dashboard.submitted.connect(self.submit)
         self.dashboard.idle_requested.connect(self.go_idle)
         self.dashboard.close_requested.connect(self.go_idle)
+        self.dashboard.path_clicked.connect(self._open_path)
         self.task_popup.close_requested.connect(self.task_popup.hide)
+        self.task_popup.path_clicked.connect(self._open_path)
 
         self._layout(initial=True)
         self.dashboard.hide()
@@ -127,13 +129,13 @@ class NativeShellController:
         self.task_popup.set_task(
             title="Active Task",
             status="Working",
-            lines=["Request received.", "Routing through the runtime\u2026"],
+            lines=["Request received.", "Routing through the runtime...", "Waiting for worker delegation..."],
         )
 
         for delay, line in [
             (240,  "Intent layer classifying request\u2026"),
-            (620,  "Workers standing by for execution\u2026"),
-            (1100, "Preparing next safe action\u2026"),
+            (620,  "Workers standing by for execution..."),
+            (1100, "Preparing next safe action..."),
         ]:
             QTimer.singleShot(delay, lambda l=line, s=seq: self._timed_line(s, l))
 
@@ -183,6 +185,16 @@ class NativeShellController:
                 out.append(f"{prefix}{val}")
         if r.metadata.get("run_command"):
             out.append("Command: " + " ".join(r.metadata["run_command"]))
+        if r.metadata.get("tool_trace"):
+            out.append("Autonomous tool trace:")
+            for step in r.metadata["tool_trace"][:8]:
+                if isinstance(step, dict):
+                    out.append(
+                        f"Step {step.get('step')}: {step.get('tool')} -> {step.get('status')}"
+                    )
+        for key in ("root_path", "repo_root", "path"):
+            if r.metadata.get(key):
+                out.append(f"{key.replace('_', ' ').title()}: {r.metadata[key]}")
         if r.metadata.get("stdout"):
             lines = str(r.metadata["stdout"]).strip().splitlines()
             if lines:
@@ -201,6 +213,20 @@ class NativeShellController:
             if missing:
                 lines += ["", "Not ready yet:"]
                 lines += [f"- {m.replace('_',' ')}" for m in missing[:5]]
+            return "\n".join(lines)
+
+        if intent == "list_directory":
+            entries = r.metadata.get("entries", [])
+            count = r.metadata.get("entry_count", len(entries) if isinstance(entries, list) else 0)
+            path = r.metadata.get("path", "")
+            lines = [f"{count} item(s)" + (f" in {path}" if path else "") + ":"]
+            if isinstance(entries, list) and entries:
+                lines += [f"- {entry}" for entry in entries]
+                remaining = int(count) - len(entries) if str(count).isdigit() else 0
+                if remaining > 0:
+                    lines.append(f"...and {remaining} more")
+            else:
+                lines.append("(empty)")
             return "\n".join(lines)
 
         lines = [r.summary]
@@ -257,12 +283,12 @@ class NativeShellController:
             seen = self._seen_workers.get(task.task_id, -1)
             if seen == -1:
                 self.task_popup.append_line(
-                    f"{task.worker_name} [{task.worker_type}] \u2192 {task.description}"
+                    f"Delegated to {task.worker_name} [{task.worker_type}] -> {task.description}"
                 )
                 self._seen_workers[task.task_id] = 0
                 seen = 0
             for line in task.output_lines[seen:]:
-                self.task_popup.append_line(line)
+                self.task_popup.append_line(f"{task.worker_name}: {line}")
             self._seen_workers[task.task_id] = len(task.output_lines)
             if task.status == "done" and seen < len(task.output_lines):
                 self.task_popup.append_line(f"{task.worker_name} finished.")
@@ -321,6 +347,17 @@ class NativeShellController:
     @staticmethod
     def _open_folder_default(path: str) -> None:
         os.startfile(path)
+
+    def _open_path(self, path: str) -> None:
+        try:
+            target = Path(path)
+            if target.exists():
+                os.startfile(str(target))
+                self.task_popup.append_line(f"Opened path: {target}")
+            else:
+                self.task_popup.append_line(f"Path does not exist: {path}")
+        except OSError as exc:
+            self.task_popup.append_line(f"Could not open path: {exc}")
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

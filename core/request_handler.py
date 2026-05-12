@@ -132,6 +132,8 @@ class RequestHandler:
             daily_state_updates["last_project_name"] = result.metadata.get("name", "")
         if result.metadata.get("root_path"):
             daily_state_updates["last_project_root_path"] = result.metadata.get("root_path", "")
+        if result.metadata.get("path"):
+            daily_state_updates["last_file_path"] = result.metadata.get("path", "")
         if result.metadata.get("intent") == "scaffold_project":
             if result.metadata.get("project_id"):
                 daily_state_updates["last_created_project_id"] = result.metadata.get("project_id", "")
@@ -140,9 +142,29 @@ class RequestHandler:
             if result.metadata.get("root_path"):
                 daily_state_updates["last_created_project_root_path"] = result.metadata.get("root_path", "")
 
+        existing_recent = _memory.get("conversation", {}).get("recent_requests", {}).get("value", [])
+        if not isinstance(existing_recent, list):
+            existing_recent = []
+        recent_entry = {
+            "request": text,
+            "intent": result.metadata.get("intent", ""),
+            "status": result.status,
+            "summary": result.summary,
+        }
+        if result.metadata.get("name"):
+            recent_entry["project"] = result.metadata.get("name", "")
+        if result.metadata.get("root_path"):
+            recent_entry["root_path"] = result.metadata.get("root_path", "")
+        if result.metadata.get("path"):
+            recent_entry["path"] = result.metadata.get("path", "")
+        recent_requests = [*existing_recent, recent_entry][-20:]
+
         memory_update_result, _ = update_memory(
             self.memory_path,
-            {"daily_state": daily_state_updates},
+            {
+                "daily_state": daily_state_updates,
+                "conversation": {"recent_requests": recent_requests},
+            },
             audit_db_path=self.db_path,
         )
         run_logger.log(

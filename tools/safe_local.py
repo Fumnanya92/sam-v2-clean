@@ -442,7 +442,7 @@ class SafeLocalTools:
                 timeout=timeout_seconds,
             )
             payload: dict[str, str | int | list[str]] = {
-                "stdout": completed.stdout.strip(),
+                "stdout": completed.stdout.rstrip(),
                 "stderr": completed.stderr.strip(),
                 "returncode": completed.returncode,
                 "command": command,
@@ -501,8 +501,9 @@ class SafeLocalTools:
 
     def inspect_git_state(self, repo_path: str | Path) -> tuple[SamResult, GitStatusSnapshot | None]:
         repo = Path(repo_path)
+        git_base = ["git", "-c", f"safe.directory={repo}"]
         inside_result, inside_payload = self.run_safe_command(
-            ["git", "rev-parse", "--is-inside-work-tree"],
+            [*git_base, "rev-parse", "--is-inside-work-tree"],
             cwd=repo,
         )
         if not inside_result.ok or inside_payload.get("stdout") != "true":
@@ -517,11 +518,11 @@ class SafeLocalTools:
                 None,
             )
 
-        branch_result, branch_payload = self.run_safe_command(["git", "branch", "--show-current"], cwd=repo)
+        branch_result, branch_payload = self.run_safe_command([*git_base, "branch", "--show-current"], cwd=repo)
         if not branch_result.ok:
             return branch_result, None
 
-        status_result, status_payload = self.run_safe_command(["git", "status", "--porcelain"], cwd=repo)
+        status_result, status_payload = self.run_safe_command([*git_base, "status", "--porcelain"], cwd=repo)
         if not status_result.ok:
             return status_result, None
 

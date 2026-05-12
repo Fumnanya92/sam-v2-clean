@@ -61,7 +61,14 @@ def build_default_registry() -> CapabilityRegistry:
     registry.register(
         Capability(
             intent="plan_request",
-            description="Higher-level request that needs planning or clarification before action.",
+            description="Higher-level request that needs autonomous read-first planning before action.",
+            action_category="read_data",
+        )
+    )
+    registry.register(
+        Capability(
+            intent="autonomous_request",
+            description="Autonomous read-first request handling with safe tool selection, observation, and final answer synthesis.",
             action_category="read_data",
         )
     )
@@ -271,6 +278,41 @@ def build_default_registry() -> CapabilityRegistry:
         Capability(
             intent="inspect_project_repo",
             description="Inspect a registered project's repository and report safe repo context.",
+            action_category="read_data",
+        )
+    )
+    registry.register(
+        Capability(
+            intent="scan_codebase_patterns",
+            description="Scan a codebase for caller-provided text patterns and report matches.",
+            action_category="read_data",
+        )
+    )
+    registry.register(
+        Capability(
+            intent="list_executor_tools",
+            description="List tools currently registered in Sam's executor.",
+            action_category="read_data",
+        )
+    )
+    registry.register(
+        Capability(
+            intent="list_worker_tasks",
+            description="List running and recently completed worker tasks.",
+            action_category="read_data",
+        )
+    )
+    registry.register(
+        Capability(
+            intent="check_python_syntax",
+            description="Parse Python files in a project and report syntax errors without writing files.",
+            action_category="read_data",
+        )
+    )
+    registry.register(
+        Capability(
+            intent="inspect_recent_changes",
+            description="Inspect recent git working-tree changes and summarize changed files.",
             action_category="read_data",
         )
     )

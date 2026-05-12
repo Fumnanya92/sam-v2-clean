@@ -132,8 +132,8 @@ class OllamaClient:
                 "- show_project_status: {\"query\": \"project name or id\"}",
                 "- execute_project_task: {\"query\": \"project name or id\", \"task_name\": \"...\"}",
                 "- run_project: {\"query\": \"project name or id\"}",
-                "- inspect_project_repo: {\"query\": \"project name or id\"}",
-                "- inspect_git_state: {\"query\": \"project name or id\"}",
+                "- inspect_project_repo: {\"query\": \"project name, id, or local repo path\"}",
+                "- inspect_git_state: {\"query\": \"project name, id, or local repo path\"}",
                 "- read_file: {\"path\": \"...\"}",
                 "- open_file: {\"path\": \"...\"}",
                 "- list_directory: {\"path\": \"...\"}",
@@ -142,9 +142,21 @@ class OllamaClient:
                 "- inspect_workspace_cleanup: {\"scope\": \"all|projects|runtime\"}",
                 "- cleanup_workspace_duplicates: {\"scope\": \"all|projects|runtime\"}",
                 "- push_changes: {}",
-                "- inspect_repo: {}",
+                "- inspect_repo: {\"query\": \"project name, id, or local repo path\"}",
+                "- scan_codebase_patterns: {\"query\": \"project name, id, or local repo path\", \"patterns\": [\"...\"]}",
+                "- list_executor_tools: {}",
+                "- list_worker_tasks: {}",
+                "- check_python_syntax: {\"query\": \"project name, id, or local path\"}",
+                "- inspect_recent_changes: {\"query\": \"project name, id, or local repo path\"}",
+                "- autonomous_request: {\"query\": \"optional project name, id, local path, or data source\"}",
                 "- plan_request: {}",
                 "- chat: {}",
+                "Use autonomous_request for open-ended investigation, multi-step diagnostic questions, data-source questions, architecture review questions, or requests that need choosing tools before answering.",
+                "For codebase scans, extract the exact user-provided terms into patterns. Do not invent project names.",
+                "For questions about registered executor tools, use list_executor_tools.",
+                "For questions about worker logs, running workers, or recently completed workers, use list_worker_tasks.",
+                "For compile/syntax-error checks on this Python app, use check_python_syntax.",
+                "For latest changes, last changes, or what changed since last run, use inspect_recent_changes.",
                 "For scaffold_project, only choose it when the user is actually asking to create/build/start a new project.",
                 "For questions about how many projects exist, use list_projects unless a more specific project-inspection capability is available.",
                 "For questions about a specific project type or name, use list_projects or project_details with the user's exact query.",
@@ -228,6 +240,55 @@ class OllamaClient:
             test_command=self._string_list(parsed.get("test_command")) or ["python", "run_project.py", "--check"],
             files=files,
         )
+
+    def choose_autonomous_action(
+        self,
+        *,
+        user_text: str,
+        tools: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        memory_block: dict[str, Any] | None = None,
+        workspace_root: str = "",
+    ) -> dict[str, Any]:
+        model = self.resolve_model()
+        prompt = "\n".join(
+            [
+                "You are Sam's autonomous reasoning loop.",
+                "Return JSON only. Do not include markdown fences.",
+                "Your job is to decide the next safe read-only action, or answer if enough evidence exists.",
+                "Use tools to inspect real local state instead of guessing.",
+                "Do not invent tool names. Choose only from Available tools JSON.",
+                "Do not request destructive, write, send, delete, push, or open-window actions.",
+                "If credentials or a data source are needed and not available in observations or memory, ask the user for the path or detail needed.",
+                "For codebase scans, pass exact user-provided search terms as patterns.",
+                "For follow-ups, use memory and observations to preserve context.",
+                "JSON shape:",
+                '{"action":"tool","tool":"tool_name","arguments":{}}',
+                "or",
+                '{"action":"final","answer":"..."}',
+                "or",
+                '{"action":"ask_user","question":"..."}',
+                f"Workspace root: {workspace_root}",
+                f"Available tools JSON: {json.dumps(tools, ensure_ascii=True)}",
+                f"Memory JSON: {json.dumps(memory_block or {}, ensure_ascii=True)[:6000]}",
+                f"Observations JSON: {json.dumps(observations, ensure_ascii=True)[:10000]}",
+                f"User request: {user_text}",
+            ]
+        )
+        payload = {"model": model, "prompt": prompt, "stream": False, "format": "json"}
+        response = self._request("POST", "/api/generate", payload)
+        raw_body = str(response.get("response", "")).strip()
+        parsed = self._parse_json_object(raw_body)
+        if not isinstance(parsed, dict):
+            raise ValueError("Ollama autonomous action response was not valid JSON.")
+        action = str(parsed.get("action", "") or "").strip().lower()
+        if action not in {"tool", "final", "ask_user"}:
+            raise ValueError(f"Unsupported autonomous action: {action}")
+        parsed["action"] = action
+        if isinstance(parsed.get("arguments"), dict):
+            return parsed
+        parsed["arguments"] = {}
+        return parsed
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None
