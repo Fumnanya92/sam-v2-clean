@@ -14,6 +14,7 @@ from capabilities import CapabilityAwarenessService, CapabilityRegistry, build_d
 from sam.planner.task_planner import TaskPlanner
 from sam.executor.tool_executor import ToolExecutor
 from intents._executor_tools_registry import register_all_executor_tools
+from intents.conversation_state import ConversationStateEngine
 from sam.executor.service_tools import register_service_tools
 # Phase 4 worker-centric runtime import (surgical addition)
 from sam.executor.worker_runtime import create_worker_centric_executor
@@ -36,7 +37,7 @@ from storage import TaskRecord, create_task, list_tasks, update_task
 from tools import CodebaseCleanupService, SafeLocalTools, WorkspaceCleanupService
 from upgrades import UpgradeProposalManager
 from workers import CommandSpec, ToolingWorker, worker_monitor
-from workflows import GoalService, PipelineService
+from workflows import DiscoveryWorkflow, GoalService, PipelineService
 
 
 @dataclass
@@ -76,6 +77,8 @@ class IntentRouter:
             registry=self.project_registry,
             tools=SafeLocalTools(db_path=self.db_path),
         )
+        self.discovery_workflow = DiscoveryWorkflow(self.project_inspector.tools, search_roots=[self.workspace_root])
+        self.conversation_state = ConversationStateEngine()
         self.workspace_cleanup = WorkspaceCleanupService(self.workspace_root, db_path=self.db_path)
         self.tooling_worker = ToolingWorker(
             db_path=self.db_path,
@@ -133,7 +136,9 @@ class IntentRouter:
 
         llm_request = self._parse_with_llm(text, memory_block)
         if llm_request is not None:
-            return self._apply_contextual_request(text, llm_request, memory_block)
+            contextual = self._apply_contextual_request(text, llm_request, memory_block)
+            enriched, _state = self.conversation_state.apply(text, contextual, memory_block)
+            return enriched
 
         return self._parse_with_rules(text)
 
@@ -222,8 +227,21 @@ class IntentRouter:
 
     def handle(self, user_text: str, memory_block: dict[str, Any] | None = None) -> SamResult:
         request = self.parse(user_text, memory_block)
+        request, state = self.conversation_state.apply(user_text.strip(), request, memory_block)
+        discovery_result = self.discovery_workflow.maybe_handle(
+            user_text.strip(),
+            parsed_intent=request.intent,
+            parsed_parameters=request.parameters,
+            memory_block=memory_block,
+        )
+        if discovery_result is not None:
+            discovery_result.metadata.setdefault("source", request.source)
+            discovery_result.metadata.setdefault("confidence", request.confidence)
+            self.conversation_state.writeback(discovery_result, state)
+            return discovery_result
         if request.needs_clarification:
-            return SamResult(
+            pending_scaffold = request.parameters.get("pending_scaffold", {}) if isinstance(request.parameters, dict) else {}
+            result = SamResult(
                 status="success",
                 summary=request.clarification_question or "I need a bit more detail before I act.",
                 next_action="ask_user",
@@ -231,21 +249,27 @@ class IntentRouter:
                     "intent": "clarify",
                     "source": request.source,
                     "confidence": request.confidence,
+                    "pending_scaffold": pending_scaffold if isinstance(pending_scaffold, dict) else {},
                 },
             )
+            self.conversation_state.writeback(result, state)
+            return result
 
         capability = self.registry.get(request.intent)
         if capability is None:
-            return SamResult(
+            result = SamResult(
                 status="failed",
                 summary="Intent is not registered.",
                 error_type=ErrorType.MISSING_CAPABILITY,
                 error_message=request.intent,
                 next_action="ask_user",
             )
+            self.conversation_state.writeback(result, state)
+            return result
 
         approval_result = self._check_authority(request, capability.action_category)
         if approval_result is not None:
+            self.conversation_state.writeback(approval_result, state)
             return approval_result
 
         # Phase 1 routing for a limited set of intents via planner & executor
@@ -341,6 +365,7 @@ class IntentRouter:
             scaffold_result.metadata.setdefault("intent", "scaffold_project")
             scaffold_result.metadata.setdefault("source", request.source)
             scaffold_result.metadata.setdefault("confidence", request.confidence)
+            scaffold_result.metadata.setdefault("pending_scaffold", {})
             return scaffold_result
 
         if request.intent == "update_task":
@@ -608,15 +633,27 @@ class IntentRouter:
                         "confidence": request.confidence,
                     },
                 )
-            names = [project.name for project in projects]
+            available = [project for project in projects if Path(project.root_path).exists()]
+            missing = [project for project in projects if not Path(project.root_path).exists()]
+            names = [project.name for project in available] if available else [project.name for project in projects]
+            if missing:
+                names_preview = ", ".join(project.name for project in missing[:5])
+                missing_note = (
+                    f" {len(missing)} project record(s) have missing folders: {names_preview}."
+                    if names_preview
+                    else f" {len(missing)} project record(s) have missing folders."
+                )
+            else:
+                missing_note = ""
             return SamResult(
                 status="success",
-                summary=f"I know about {len(names)} project(s): {', '.join(names)}.",
+                summary=f"I know about {len(names)} available project(s): {', '.join(names)}.{missing_note}",
                 next_action="stop",
                 metadata={
                     "intent": "list_projects",
                     "count": len(names),
                     "projects": names,
+                    "missing_projects": [project.name for project in missing],
                     "source": request.source,
                     "confidence": request.confidence,
                 },
@@ -824,6 +861,25 @@ class IntentRouter:
             project_result, project = self.project_registry.find_project(query)
             if not project_result.ok or project is None:
                 return self._service_result("open_project_folder", project_result, metadata={"query": query})
+            if not Path(project.root_path).exists():
+                return SamResult(
+                    status="failed",
+                    summary=(
+                        f"I found project '{project.name}', but its folder is missing at {project.root_path}. "
+                        "Please choose another project or rescan your workspace."
+                    ),
+                    error_type=ErrorType.FILE_ACCESS_ERROR,
+                    error_message=project.root_path,
+                    next_action="ask_user",
+                    metadata={
+                        "intent": "open_project_folder",
+                        "project_id": project.project_id,
+                        "name": project.name,
+                        "root_path": project.root_path,
+                        "source": request.source,
+                        "confidence": request.confidence,
+                    },
+                )
             open_result = self.project_inspector.tools.open_directory(project.root_path)
             open_result.metadata.setdefault("intent", "open_project_folder")
             open_result.metadata.setdefault("project_id", project.project_id)
@@ -1197,6 +1253,28 @@ class IntentRouter:
         daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
         last_file_path = str(daily_state.get("last_file_path", {}).get("value", "")).strip()
         last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "")).strip()
+        last_runtime_intent = str(daily_state.get("last_runtime_intent", {}).get("value", "")).strip().lower()
+        last_runtime_summary = str(daily_state.get("last_runtime_summary", {}).get("value", "")).strip()
+        pending_scaffold_raw = memory_block.get("scaffold_pending", {}) if isinstance(memory_block, dict) else {}
+        if isinstance(pending_scaffold_raw, dict) and "value" in pending_scaffold_raw:
+            pending_scaffold_raw = pending_scaffold_raw.get("value", {})
+        pending_scaffold = pending_scaffold_raw if isinstance(pending_scaffold_raw, dict) else {}
+
+        if request.intent == "chat" and self._asks_about_known_projects(text):
+            request.intent = "list_projects"
+            request.parameters = {}
+            request.needs_clarification = False
+            request.clarification_question = ""
+
+        scaffold_followup = self._maybe_scaffold_followup(
+            text=text,
+            request=request,
+            last_runtime_intent=last_runtime_intent,
+            last_runtime_summary=last_runtime_summary,
+            pending_scaffold=pending_scaffold,
+        )
+        if scaffold_followup is not None:
+            return scaffold_followup
 
         if self._wants_summary(text):
             path = str(request.parameters.get("path", "")).strip()
@@ -1226,6 +1304,136 @@ class IntentRouter:
                 request.parameters[key] = last_project_root
 
         return request
+
+    @staticmethod
+    def _asks_about_known_projects(text: str) -> bool:
+        lowered = text.lower()
+        return (
+            ("project" in lowered or "projects" in lowered)
+            and any(token in lowered for token in ("completed", "finished", "done", "built"))
+        )
+
+    def _maybe_scaffold_followup(
+        self,
+        *,
+        text: str,
+        request: IntentRequest,
+        last_runtime_intent: str,
+        last_runtime_summary: str,
+        pending_scaffold: dict[str, Any],
+    ) -> IntentRequest | None:
+        lowered = text.lower().strip()
+        if not lowered:
+            return None
+
+        recent_scaffold_context = (
+            request.intent == "scaffold_project"
+            or "tic-tac-toe" in lowered
+            or "tictac" in lowered
+            or "new project" in lowered
+            or "new one" in lowered
+            or "create a new" in lowered
+            or bool(pending_scaffold)
+            or (
+                last_runtime_intent == "clarify"
+                and "new" in last_runtime_summary.lower()
+                and ("project" in last_runtime_summary.lower() or "tic-tac-toe" in last_runtime_summary.lower())
+            )
+        )
+        if not recent_scaffold_context:
+            return None
+
+        merged = {
+            "name": str(pending_scaffold.get("name", "")).strip(),
+            "project_type": str(pending_scaffold.get("project_type", "")).strip(),
+        }
+        extracted_type = self._extract_project_type(text)
+        extracted_name = self._extract_project_name(text)
+        if extracted_type:
+            merged["project_type"] = extracted_type
+        if extracted_name:
+            merged["name"] = extracted_name
+
+        asks_for_type = "type" in last_runtime_summary.lower()
+        asks_for_name = "name" in last_runtime_summary.lower() or "named" in last_runtime_summary.lower()
+
+        if merged["name"] and merged["project_type"]:
+            return IntentRequest(
+                intent="scaffold_project",
+                parameters={"name": merged["name"], "project_type": merged["project_type"]},
+                raw_text=text,
+                needs_clarification=False,
+                confidence=request.confidence,
+                source=request.source or "context",
+            )
+
+        if asks_for_type and merged["project_type"] and not merged["name"]:
+            return IntentRequest(
+                intent="clarify",
+                parameters={"pending_scaffold": merged},
+                raw_text=text,
+                needs_clarification=True,
+                clarification_question="What should I name the new project?",
+                confidence=request.confidence,
+                source=request.source or "context",
+            )
+
+        if asks_for_name and merged["name"] and not merged["project_type"]:
+            return IntentRequest(
+                intent="clarify",
+                parameters={"pending_scaffold": merged},
+                raw_text=text,
+                needs_clarification=True,
+                clarification_question="What project type should I use (for example: web app, python console app)?",
+                confidence=request.confidence,
+                source=request.source or "context",
+            )
+
+        if merged["name"] or merged["project_type"]:
+            return IntentRequest(
+                intent="clarify",
+                parameters={"pending_scaffold": merged},
+                raw_text=text,
+                needs_clarification=True,
+                clarification_question=(
+                    "I can create that project. I still need both a project name and type."
+                    if not merged["name"] and not merged["project_type"]
+                    else ("What should I name the new project?" if not merged["name"] else "What project type should I use?")
+                ),
+                confidence=request.confidence,
+                source=request.source or "context",
+            )
+
+        return None
+
+    @staticmethod
+    def _extract_project_type(text: str) -> str:
+        lowered = text.lower()
+        if "web app" in lowered or lowered == "web":
+            return "web app"
+        if "python console" in lowered or "console app" in lowered:
+            return "python console app"
+        if "flutter" in lowered:
+            return "flutter app"
+        if "html" in lowered:
+            return "html app"
+        return ""
+
+    @staticmethod
+    def _extract_project_name(text: str) -> str:
+        lowered = text.lower().strip()
+        direct = re.match(r"^(?:name\s+it|call\s+it)\s+(.+)$", lowered)
+        if direct:
+            return direct.group(1).strip()
+        generic = {"web app", "web", "python", "console app", "yes", "no", "create a new one", "new one"}
+        cleaned = text.strip().strip(".!,")
+        if not cleaned:
+            return ""
+        if lowered in generic:
+            return ""
+        if len(cleaned.split()) <= 4 and any(ch.isalnum() for ch in cleaned):
+            return cleaned
+        return ""
 
     @staticmethod
     def _path_from_text(text: str) -> str:

@@ -23,6 +23,34 @@ def _log(msg: str) -> None:
     print(f"[SAM_UI] {msg}", flush=True)
 
 
+def _trace_line(item: object) -> str:
+    if not isinstance(item, dict):
+        return str(item).strip()
+    label = str(item.get("label", "")).strip()
+    parts: list[str] = []
+    if item.get("tool"):
+        parts.append(f"tool={item['tool']}")
+    if item.get("action"):
+        parts.append(f"action={item['action']}")
+    if item.get("path"):
+        parts.append(f"path={item['path']}")
+    if item.get("command"):
+        command = item["command"]
+        if isinstance(command, list):
+            command = " ".join(str(part) for part in command)
+        parts.append(f"command={command}")
+    if item.get("observation"):
+        parts.append(f"observed={item['observation']}")
+    if item.get("reason"):
+        parts.append(f"reason={item['reason']}")
+    status = str(item.get("status", "")).strip()
+    if status and status not in {"info", "success"}:
+        parts.append(f"status={status}")
+    if not label and not parts:
+        return ""
+    return label if not parts else f"{label}: " + "; ".join(parts)
+
+
 # ── background worker thread ───────────────────────────────────────────────────
 
 class _RequestThread(QThread):
@@ -37,6 +65,16 @@ class _RequestThread(QThread):
         self.result = self.runtime.handle_text(self.text)
         if self.result:
             _log(f"Request done: status={self.result.status} summary={self.result.summary!r}")
+            trace = self.result.metadata.get("execution_trace", [])
+            if isinstance(trace, list):
+                for item in trace:
+                    line = _trace_line(item)
+                    if line:
+                        _log(f"Trace: {line}")
+            candidates = self.result.metadata.get("candidates", [])
+            if isinstance(candidates, list) and candidates:
+                preview = ", ".join(Path(str(item)).name for item in candidates[:12])
+                _log(f"Candidates: {preview}")
 
 
 # ── controller ────────────────────────────────────────────────────────────────
@@ -174,6 +212,10 @@ class NativeShellController:
 
     def _task_lines(self, r: SamResult) -> list[str]:
         out = [r.summary, f"Next: {r.next_action or 'stop'}"]
+        trace = r.metadata.get("execution_trace", [])
+        if isinstance(trace, list) and trace:
+            out.append("Execution trace:")
+            out.extend([line for item in trace[:10] if (line := _trace_line(item))])
         for key, prefix in [
             ("worker_updates", ""),
             ("worker_name",    "Worker: "),
@@ -227,6 +269,18 @@ class NativeShellController:
                     lines.append(f"...and {remaining} more")
             else:
                 lines.append("(empty)")
+            return "\n".join(lines)
+
+        if intent == "discovery_workflow":
+            lines = [r.summary]
+            trace = r.metadata.get("execution_trace", [])
+            if isinstance(trace, list) and trace:
+                lines += ["", "What I did:"]
+                lines += [f"- {line}" for item in trace if (line := _trace_line(item))]
+            candidates = r.metadata.get("candidates", [])
+            if isinstance(candidates, list) and candidates:
+                lines += ["", "Candidates:"]
+                lines += [f"{index}. {Path(str(item)).name}" for index, item in enumerate(candidates[:20], start=1)]
             return "\n".join(lines)
 
         lines = [r.summary]

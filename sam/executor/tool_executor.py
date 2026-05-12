@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
+from diagnostics.trace import append_trace, trace_step
 
 
 @dataclass(slots=True)
@@ -49,13 +50,16 @@ class ToolExecutor:
     def execute(self, tool_name: str, payload: dict[str, Any] | None = None) -> SamResult:
         resolved_tool_name = self.resolve_tool_name(tool_name)
         if resolved_tool_name not in self._tools:
-            return SamResult(
+            return append_trace(
+                SamResult(
                 status="failed",
                 summary="Tool is not registered.",
                 error_type=ErrorType.MISSING_CAPABILITY,
                 error_message=tool_name,
                 next_action="ask_user",
                 metadata={"tool": tool_name},
+                ),
+                trace_step("Tool selection failed", status="failed", tool=tool_name, reason="Tool is not registered"),
             )
 
         definition = self._tools[resolved_tool_name]
@@ -64,13 +68,21 @@ class ToolExecutor:
             result.metadata.setdefault("tool", resolved_tool_name)
             if resolved_tool_name != tool_name:
                 result.metadata.setdefault("requested_tool", tool_name)
-            return result
+            return append_trace(
+                result,
+                trace_step("Tool selected", tool=resolved_tool_name, action=resolved_tool_name),
+                trace_step("Observation", status=result.status, observation=result.summary),
+            )
 
-        return SamResult(
+        return append_trace(
+            SamResult(
             status="success",
             summary=str(result) if result is not None else "Tool executed successfully.",
             next_action="stop",
             metadata={"tool": resolved_tool_name, "requested_tool": tool_name, "result": result},
+            ),
+            trace_step("Tool selected", tool=resolved_tool_name, action=resolved_tool_name),
+            trace_step("Observation", status="success", observation=str(result) if result is not None else "Tool executed successfully."),
         )
 
     def resolve_tool_name(self, tool_name: str) -> str:

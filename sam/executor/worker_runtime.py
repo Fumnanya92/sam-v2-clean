@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from diagnostics.result import SamResult
+from diagnostics.trace import append_trace, trace_step
 from workers.monitor import WorkerMonitor, worker_monitor
 
 
@@ -150,6 +151,15 @@ class WorkerCentricExecutor:
                 result.metadata.setdefault("worker_task_id", context.task.task_id if context.task else None)
                 result.metadata.setdefault("worker_name", context.task.worker_name if context.task else "ToolExecutor")
                 result.metadata.setdefault("worker_type", context.task.worker_type if context.task else "executor")
+                append_trace(
+                    result,
+                    trace_step(
+                        "Worker delegated",
+                        tool=tool_name,
+                        action="execute_with_tracking",
+                        observation=context.task.worker_name if context.task else "ToolExecutor",
+                    ),
+                )
             
             return result
         
@@ -158,7 +168,8 @@ class WorkerCentricExecutor:
             context.observe(error_msg)
             context.fail(error_msg)
             
-            return SamResult(
+            return append_trace(
+                SamResult(
                 status="failed",
                 summary=f"Tool execution failed: {tool_name}",
                 error_type="EXECUTION_ERROR",
@@ -170,6 +181,8 @@ class WorkerCentricExecutor:
                     "worker_name": context.task.worker_name if context.task else "ToolExecutor",
                     "worker_type": context.task.worker_type if context.task else "executor",
                 },
+                ),
+                trace_step("Tool execution failed", status="failed", tool=tool_name, observation=error_msg),
             )
 
 

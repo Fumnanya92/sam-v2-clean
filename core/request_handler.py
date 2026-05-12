@@ -10,8 +10,10 @@ from capabilities import CapabilityRegistry
 from diagnostics.error_types import ErrorType
 from diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
 from diagnostics.result import SamResult
+from diagnostics.trace import ensure_trace
 from diagnostics.run_logger import RunLogger
 from intents import IntentRouter
+from intents.conversation_state import ConversationState
 from memory.manager import load_memory, update_memory
 from memory.session import save_session_state
 from storage.db import log_audit_event
@@ -104,7 +106,12 @@ class RequestHandler:
             summary_logger.write(result, metadata={"session_id": session.session_id})
             return result
 
-        result = self.router.handle(text, memory_block=_memory)
+        result = ensure_trace(self.router.handle(text, memory_block=_memory))
+        # Preserve router-produced conversation state; synthesize only when missing.
+        conversation_state_updates = result.metadata.get("conversation_state")
+        if not isinstance(conversation_state_updates, dict):
+            prior_state = ConversationState.from_memory(_memory)
+            conversation_state_updates = self.router.conversation_state.writeback(result, prior_state)
         session.record(text, result)
         run_logger.log(
             "request_routed",
@@ -134,6 +141,11 @@ class RequestHandler:
             daily_state_updates["last_project_root_path"] = result.metadata.get("root_path", "")
         if result.metadata.get("path"):
             daily_state_updates["last_file_path"] = result.metadata.get("path", "")
+        discovery_updates = result.metadata.get("discovery_state")
+        discovery_payload = {"value": discovery_updates} if discovery_updates else {"value": {}}
+        scaffold_pending = result.metadata.get("pending_scaffold")
+        scaffold_payload = {"value": scaffold_pending} if isinstance(scaffold_pending, dict) else {"value": {}}
+        conversation_state_payload = {"value": conversation_state_updates} if isinstance(conversation_state_updates, dict) else {"value": {}}
         if result.metadata.get("intent") == "scaffold_project":
             if result.metadata.get("project_id"):
                 daily_state_updates["last_created_project_id"] = result.metadata.get("project_id", "")
@@ -163,6 +175,9 @@ class RequestHandler:
             self.memory_path,
             {
                 "daily_state": daily_state_updates,
+                "discovery": discovery_payload,
+                "scaffold_pending": scaffold_payload,
+                "conversation_state": conversation_state_payload,
                 "conversation": {"recent_requests": recent_requests},
             },
             audit_db_path=self.db_path,
