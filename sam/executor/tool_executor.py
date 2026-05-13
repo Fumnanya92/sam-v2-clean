@@ -16,6 +16,9 @@ class ToolDefinition:
     action_category: str = "read_data"
     requires_write: bool = False
 
+    def __call__(self, payload: dict[str, Any] | None = None) -> Any:
+        return self.handler(payload or {})
+
 
 class ToolExecutor:
     """Thin execution layer for invoking registered tools dynamically."""

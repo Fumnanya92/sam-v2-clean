@@ -36,6 +36,7 @@ def register_service_tools(executor: Any, repo_root: str, db_path: str | None = 
 
 def _register_codebase_tools(executor: Any, cleanup_service: CodebaseCleanupService) -> None:
     """Register CodebaseCleanupService handlers."""
+    has_scan_handler = executor.get("scan_codebase_patterns") is not None
     
     def _scan_codebase_patterns_handler(payload: dict[str, Any] | None = None) -> SamResult:
         """Scan codebase for requested patterns.
@@ -77,13 +78,14 @@ def _register_codebase_tools(executor: Any, cleanup_service: CodebaseCleanupServ
                 })
         return result
     
-    executor.register(
-        "scan_codebase_patterns",
-        _scan_codebase_patterns_handler,
-        description="Scan codebase for specific text patterns",
-        action_category="read_data",
-        requires_write=False,
-    )
+    if not has_scan_handler:
+        executor.register(
+            "scan_codebase_patterns",
+            _scan_codebase_patterns_handler,
+            description="Scan codebase for specific text patterns",
+            action_category="read_data",
+            requires_write=False,
+        )
     
     def _replace_codebase_patterns_handler(payload: dict[str, Any] | None = None) -> SamResult:
         """Apply replacements to codebase.

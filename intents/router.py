@@ -15,6 +15,8 @@ from sam.planner.task_planner import TaskPlanner
 from sam.executor.tool_executor import ToolExecutor
 from intents._executor_tools_registry import register_all_executor_tools
 from intents.conversation_state import ConversationStateEngine
+from intents.contextual_resolver import ContextualRequestResolver
+from intents.legacy_adapter import LegacyIntentAdapter
 from sam.executor.service_tools import register_service_tools
 # Phase 4 worker-centric runtime import (surgical addition)
 from sam.executor.worker_runtime import create_worker_centric_executor
@@ -37,6 +39,7 @@ from storage import TaskRecord, create_task, list_tasks, update_task
 from tools import CodebaseCleanupService, SafeLocalTools, WorkspaceCleanupService
 from upgrades import UpgradeProposalManager
 from workers import CommandSpec, ToolingWorker, worker_monitor
+from workers.names import resolve_worker_identity
 from workflows import DiscoveryWorkflow, GoalService, PipelineService
 
 
@@ -79,6 +82,7 @@ class IntentRouter:
         )
         self.discovery_workflow = DiscoveryWorkflow(self.project_inspector.tools, search_roots=[self.workspace_root])
         self.conversation_state = ConversationStateEngine()
+        self.contextual_resolver = ContextualRequestResolver()
         self.workspace_cleanup = WorkspaceCleanupService(self.workspace_root, db_path=self.db_path)
         self.tooling_worker = ToolingWorker(
             db_path=self.db_path,
@@ -100,6 +104,7 @@ class IntentRouter:
             project_registry=self.project_registry,
             upgrade_manager=self.upgrade_manager,
         )
+        self.legacy_adapter = LegacyIntentAdapter(self)
         # Initialise Phase 1 planner and executor
         self.task_planner = TaskPlanner(self.registry)
         # Use base executor for registration, then wrap for worker tracking
@@ -225,20 +230,15 @@ class IntentRouter:
         """
         return None
 
-    def handle(self, user_text: str, memory_block: dict[str, Any] | None = None) -> SamResult:
-        request = self.parse(user_text, memory_block)
+    def handle(
+        self,
+        user_text: str,
+        memory_block: dict[str, Any] | None = None,
+        parsed_request: IntentRequest | None = None,
+        prechecked_authority: bool = False,
+    ) -> SamResult:
+        request = parsed_request or self.parse(user_text, memory_block)
         request, state = self.conversation_state.apply(user_text.strip(), request, memory_block)
-        discovery_result = self.discovery_workflow.maybe_handle(
-            user_text.strip(),
-            parsed_intent=request.intent,
-            parsed_parameters=request.parameters,
-            memory_block=memory_block,
-        )
-        if discovery_result is not None:
-            discovery_result.metadata.setdefault("source", request.source)
-            discovery_result.metadata.setdefault("confidence", request.confidence)
-            self.conversation_state.writeback(discovery_result, state)
-            return discovery_result
         if request.needs_clarification:
             pending_scaffold = request.parameters.get("pending_scaffold", {}) if isinstance(request.parameters, dict) else {}
             result = SamResult(
@@ -255,918 +255,64 @@ class IntentRouter:
             self.conversation_state.writeback(result, state)
             return result
 
-        capability = self.registry.get(request.intent)
-        if capability is None:
-            result = SamResult(
-                status="failed",
-                summary="Intent is not registered.",
-                error_type=ErrorType.MISSING_CAPABILITY,
-                error_message=request.intent,
-                next_action="ask_user",
-            )
-            self.conversation_state.writeback(result, state)
-            return result
-
-        approval_result = self._check_authority(request, capability.action_category)
-        if approval_result is not None:
-            self.conversation_state.writeback(approval_result, state)
-            return approval_result
-
-        # Phase 1 routing for a limited set of intents via planner & executor
-        if request.intent in {"capabilities", "list_tasks", "list_goals", "list_projects"}:
-            return self._execute_with_planner(request, memory_block)
-
-        if request.intent == "capabilities":
-            awareness_result = self.awareness.describe_self()
-            if not awareness_result.ok:
-                return self._service_result("capabilities", awareness_result)
-            awareness_result.metadata.setdefault("intent", request.intent)
-            awareness_result.metadata.setdefault("source", request.source)
-            awareness_result.metadata.setdefault("confidence", request.confidence)
-            return awareness_result
-
-        if request.intent == "awareness_check":
-            capability_name = str(request.parameters.get("capability_name", "")).strip()
-            if not capability_name:
-                return SamResult(
+        if not prechecked_authority:
+            capability = self.registry.get(request.intent)
+            if capability is None:
+                result = SamResult(
                     status="failed",
-                    summary="Capability name is required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing capability name",
-                    next_action="ask_user",
-                    metadata={"intent": "awareness_check", "source": request.source},
-                )
-            awareness_result = self.awareness.check_request(capability_name)
-            awareness_result.metadata.setdefault("intent", "awareness_check")
-            awareness_result.metadata.setdefault("source", request.source)
-            awareness_result.metadata.setdefault("confidence", request.confidence)
-            return awareness_result
-
-        if request.intent == "propose_upgrade":
-            capability_name = str(request.parameters.get("capability_name", "")).strip().replace(" ", "_")
-            if not capability_name:
-                return SamResult(
-                    status="failed",
-                    summary="Capability name is required for an upgrade proposal.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing capability name",
-                    next_action="ask_user",
-                    metadata={"intent": "propose_upgrade", "source": request.source},
-                )
-            proposal_result = self.awareness.propose_upgrade(
-                capability_name,
-                f"User requested upgrade support for {capability_name}.",
-            )
-            proposal_result.metadata.setdefault("intent", "propose_upgrade")
-            proposal_result.metadata.setdefault("source", request.source)
-            proposal_result.metadata.setdefault("confidence", request.confidence)
-            return proposal_result
-
-        if request.intent == "create_goal":
-            title = request.parameters.get("title", "").strip()
-            if not title:
-                return SamResult(
-                    status="failed",
-                    summary="Goal title is required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing title",
-                    next_action="ask_user",
-                )
-            result, goal = self.goal_service.create_goal(title=title)
-            return self._service_result(
-                "create_goal",
-                result,
-                goal.id if goal else None,
-                metadata={
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
-        if request.intent == "create_task":
-            title = str(request.parameters.get("title", "")).strip()
-            if not title:
-                return SamResult(
-                    status="failed",
-                    summary="Task title is required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing title",
-                    next_action="ask_user",
-                )
-            result, task_id = create_task(self.db_path, TaskRecord(title=title))
-            return self._service_result("create_task", result, identifier=str(task_id) if task_id is not None else None)
-
-        if request.intent == "scaffold_project":
-            project_name = str(request.parameters.get("name", "")).strip()
-            project_type = str(request.parameters.get("project_type", "html_game")).strip() or "html_game"
-            scaffold_result = self.project_scaffolder.scaffold(
-                ProjectScaffoldRequest(name=project_name, project_type=project_type)
-            )
-            scaffold_result.metadata.setdefault("intent", "scaffold_project")
-            scaffold_result.metadata.setdefault("source", request.source)
-            scaffold_result.metadata.setdefault("confidence", request.confidence)
-            scaffold_result.metadata.setdefault("pending_scaffold", {})
-            return scaffold_result
-
-        if request.intent == "update_task":
-            task_id_text = str(request.parameters.get("task_id", "")).strip()
-            status_text = str(request.parameters.get("status", "")).strip()
-            notes_text = str(request.parameters.get("notes", "")).strip()
-            if not task_id_text.isdigit():
-                return SamResult(
-                    status="failed",
-                    summary="Task id is required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing or invalid task id",
-                    next_action="ask_user",
-                )
-            if not status_text and not notes_text:
-                return SamResult(
-                    status="failed",
-                    summary="Task update needs a status or notes value.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing update values",
-                    next_action="ask_user",
-                )
-            result, task = update_task(
-                self.db_path,
-                int(task_id_text),
-                status=status_text or None,
-                notes=notes_text or None,
-            )
-            return self._service_result("update_task", result, identifier=str(task.id) if task is not None else task_id_text)
-
-        if request.intent == "list_goals":
-            result, goals = self.goal_service.list_goals(status="active")
-            return self._service_result(
-                "list_goals",
-                result,
-                metadata={
-                    "count": len(goals),
-                    "titles": [goal.title for goal in goals],
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
-        if request.intent == "inspect_workspace_cleanup":
-            scope = str(request.parameters.get("scope", "all")).strip() or "all"
-            inspect_result, _metadata = self.workspace_cleanup.inspect(scope)
-            inspect_result.metadata.setdefault("intent", "inspect_workspace_cleanup")
-            inspect_result.metadata.setdefault("source", request.source)
-            inspect_result.metadata.setdefault("confidence", request.confidence)
-            inspect_result.next_action = "ask_user"
-            return inspect_result
-
-        if request.intent == "cleanup_workspace_duplicates":
-            scope = str(request.parameters.get("scope", "all")).strip() or "all"
-            cleanup_result = self.workspace_cleanup.cleanup(scope)
-            cleanup_result.metadata.setdefault("intent", "cleanup_workspace_duplicates")
-            cleanup_result.metadata.setdefault("source", request.source)
-            cleanup_result.metadata.setdefault("confidence", request.confidence)
-            return cleanup_result
-
-        if request.intent == "list_tasks":
-            task_result, tasks = list_tasks(self.db_path)
-            if not task_result.ok:
-                return self._service_result("list_tasks", task_result)
-            if not tasks:
-                return SamResult(
-                    status="success",
-                    summary="I do not have any tracked tasks yet.",
-                    next_action="ask_user",
-                    metadata={
-                        "intent": "list_tasks",
-                        "count": 0,
-                        "tasks": [],
-                        "source": request.source,
-                        "confidence": request.confidence,
-                    },
-                )
-            task_items = [
-                {
-                    "id": task.id,
-                    "title": task.title,
-                    "status": task.status,
-                    "priority": task.priority,
-                    "notes": task.notes,
-                }
-                for task in tasks
-            ]
-            preview = ", ".join(f"#{item['id']} {item['title']} [{item['status']}]" for item in task_items[:3])
-            remaining = len(task_items) - min(len(task_items), 3)
-            if remaining > 0:
-                preview = f"{preview}, and {remaining} more"
-            return SamResult(
-                status="success",
-                summary=f"I have {len(task_items)} tracked task(s): {preview}.",
-                next_action="stop",
-                metadata={
-                    "intent": "list_tasks",
-                    "count": len(task_items),
-                    "tasks": task_items,
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
-        if request.intent == "read_file":
-            path_text = str(request.parameters.get("path", "")).strip()
-            if not path_text:
-                return SamResult(
-                    status="failed",
-                    summary="File path is required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing file path",
-                    next_action="ask_user",
-                )
-            additional_roots: list[str] = []
-            daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
-            last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "")).strip()
-            if last_project_root:
-                additional_roots.append(last_project_root)
-            resolve_result, resolved_file = self.project_inspector.tools.resolve_file_query(
-                path_text,
-                additional_roots=additional_roots,
-            )
-            if not resolve_result.ok or resolved_file is None:
-                return self._service_result("read_file", resolve_result, metadata={"path": path_text})
-            file_result, content = self.project_inspector.tools.read_text_file(resolved_file)
-            if not file_result.ok or content is None:
-                return self._service_result("read_file", file_result, metadata={"path": path_text})
-            wants_summary = self._wants_summary(request.raw_text)
-            summary = self._summarize_text(content, str(resolved_file)) if wants_summary else "File read succeeded."
-            return SamResult(
-                status="success",
-                summary=summary,
-                next_action="stop",
-                metadata={
-                    "intent": "read_file",
-                    "path": file_result.metadata.get("path", str(resolved_file)),
-                    "content": content,
-                    "chars_returned": file_result.metadata.get("chars_returned", len(content)),
-                    "summary_mode": wants_summary,
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
-        if request.intent == "open_file":
-            path_text = str(request.parameters.get("path", "")).strip()
-            if not path_text:
-                return SamResult(
-                    status="failed",
-                    summary="File path is required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing file path",
-                    next_action="ask_user",
-                    metadata={"intent": "open_file", "source": request.source},
-                )
-            additional_roots: list[str] = []
-            daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
-            last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "")).strip()
-            if last_project_root:
-                additional_roots.append(last_project_root)
-            open_result = self.project_inspector.tools.open_file_query(path_text, additional_roots=additional_roots)
-            open_result.metadata.setdefault("intent", "open_file")
-            open_result.metadata.setdefault("source", request.source)
-            open_result.metadata.setdefault("confidence", request.confidence)
-            return open_result
-
-        if request.intent == "list_directory":
-            path_text = str(request.parameters.get("path", "")).strip()
-            if not path_text:
-                return SamResult(
-                    status="failed",
-                    summary="Directory path is required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing directory path",
-                    next_action="ask_user",
-                )
-            directory_result, entries = self.project_inspector.tools.list_directory(path_text)
-            if not directory_result.ok:
-                return self._service_result("list_directory", directory_result, metadata={"path": path_text})
-            preview = entries[:12]
-            remaining = max(0, len(entries) - len(preview))
-            summary = f"{len(entries)} item(s) in {directory_result.metadata.get('path', path_text)}."
-            if preview:
-                summary += " " + ", ".join(preview)
-                if remaining:
-                    summary += f", and {remaining} more"
-                summary += "."
-            return SamResult(
-                status="success",
-                summary=summary,
-                next_action="stop",
-                metadata={
-                    "intent": "list_directory",
-                    "path": directory_result.metadata.get("path", path_text),
-                    "entries": preview,
-                    "entry_count": directory_result.metadata.get("entry_count", len(entries)),
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
-        if request.intent == "list_approvals":
-            approval_result, approvals = self.approval_manager.list_pending()
-            if not approval_result.ok:
-                return self._service_result("list_approvals", approval_result)
-            if not approvals:
-                return SamResult(
-                    status="success",
-                    summary="I do not have any pending approvals right now.",
-                    next_action="stop",
-                    metadata={
-                        "intent": "list_approvals",
-                        "count": 0,
-                        "approvals": [],
-                        "source": request.source,
-                        "confidence": request.confidence,
-                    },
-                )
-            approval_items = [
-                {
-                    "id": approval.id,
-                    "agent_name": approval.agent_name,
-                    "tool_name": approval.tool_name,
-                    "reason": approval.reason,
-                    "urgency": approval.urgency,
-                    "status": approval.status,
-                }
-                for approval in approvals
-            ]
-            preview = ", ".join(
-                f"{item['tool_name']} by {item['agent_name']} [{item['urgency']}]"
-                for item in approval_items[:3]
-            )
-            remaining = len(approval_items) - min(len(approval_items), 3)
-            if remaining > 0:
-                preview = f"{preview}, and {remaining} more"
-            return SamResult(
-                status="success",
-                summary=f"I have {len(approval_items)} pending approval request(s): {preview}.",
-                next_action="stop",
-                metadata={
-                    "intent": "list_approvals",
-                    "count": len(approval_items),
-                    "approvals": approval_items,
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
-        if request.intent == "list_projects":
-            project_result, projects = self.project_registry.list_projects()
-            if not project_result.ok:
-                return self._service_result("list_projects", project_result)
-            if not projects:
-                return SamResult(
-                    status="success",
-                    summary="I do not have any registered projects yet.",
-                    next_action="ask_user",
-                    metadata={
-                        "intent": "list_projects",
-                        "count": 0,
-                        "projects": [],
-                        "source": request.source,
-                        "confidence": request.confidence,
-                    },
-                )
-            available = [project for project in projects if Path(project.root_path).exists()]
-            missing = [project for project in projects if not Path(project.root_path).exists()]
-            names = [project.name for project in available] if available else [project.name for project in projects]
-            if missing:
-                names_preview = ", ".join(project.name for project in missing[:5])
-                missing_note = (
-                    f" {len(missing)} project record(s) have missing folders: {names_preview}."
-                    if names_preview
-                    else f" {len(missing)} project record(s) have missing folders."
-                )
-            else:
-                missing_note = ""
-            return SamResult(
-                status="success",
-                summary=f"I know about {len(names)} available project(s): {', '.join(names)}.{missing_note}",
-                next_action="stop",
-                metadata={
-                    "intent": "list_projects",
-                    "count": len(names),
-                    "projects": names,
-                    "missing_projects": [project.name for project in missing],
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
-        if request.intent == "project_details":
-            query = str(request.parameters.get("query", "")).strip()
-            if request.parameters.get("use_memory"):
-                daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
-                query = (
-                    str(daily_state.get("last_project_id", {}).get("value", "")).strip()
-                    or str(daily_state.get("last_project_name", {}).get("value", "")).strip()
-                )
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Project name is required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query",
-                    next_action="ask_user",
-                    metadata={"intent": "project_details", "source": request.source},
-                )
-            project_result, project = self.project_registry.find_project(query)
-            if not project_result.ok or project is None:
-                return self._service_result("project_details", project_result, metadata={"query": query})
-            return SamResult(
-                status="success",
-                summary=(
-                    f"Project {project.name} is a {project.stack or 'unspecified'} project on branch "
-                    f"{project.active_branch or 'unknown'}. It is saved at {project.root_path}."
-                ),
-                next_action="stop",
-                metadata={
-                    "intent": "project_details",
-                    "project_id": project.project_id,
-                    "name": project.name,
-                    "root_path": project.root_path,
-                    "stack": project.stack,
-                    "test_command": project.test_command or [],
-                    "build_command": project.build_command or [],
-                    "active_branch": project.active_branch,
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
-        if request.intent == "plan_project":
-            query = str(request.parameters.get("query", "")).strip()
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Project name is required to plan a project.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query",
-                    next_action="ask_user",
-                    metadata={"intent": "plan_project", "source": request.source},
-                )
-            plan_result = self.project_planner.plan(ProjectPlanRequest(query=query))
-            plan_result.metadata.setdefault("intent", "plan_project")
-            plan_result.metadata.setdefault("source", request.source)
-            plan_result.metadata.setdefault("confidence", request.confidence)
-            return plan_result
-
-        if request.intent == "show_delegation":
-            query = str(request.parameters.get("query", "")).strip()
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Project name is required to show delegation.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query",
-                    next_action="ask_user",
-                    metadata={"intent": "show_delegation", "source": request.source},
-                )
-            report_result = self.project_planner.show_delegation(query)
-            report_result.metadata.setdefault("intent", "show_delegation")
-            report_result.metadata.setdefault("source", request.source)
-            report_result.metadata.setdefault("confidence", request.confidence)
-            return report_result
-
-        if request.intent == "show_project_progress":
-            query = str(request.parameters.get("query", "")).strip()
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Project name is required to show progress.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query",
-                    next_action="ask_user",
-                    metadata={"intent": "show_project_progress", "source": request.source},
-                )
-            progress_result = self.project_planner.show_progress(query)
-            progress_result.metadata.setdefault("intent", "show_project_progress")
-            progress_result.metadata.setdefault("source", request.source)
-            progress_result.metadata.setdefault("confidence", request.confidence)
-            return progress_result
-
-        if request.intent == "show_project_status":
-            query = str(request.parameters.get("query", "")).strip()
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Project name is required to show status.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query",
-                    next_action="ask_user",
-                    metadata={"intent": "show_project_status", "source": request.source},
-                )
-            status_result = self.project_planner.show_status(query)
-            status_result.metadata.setdefault("intent", "show_project_status")
-            status_result.metadata.setdefault("source", request.source)
-            status_result.metadata.setdefault("confidence", request.confidence)
-            return status_result
-
-        if request.intent == "execute_project_task":
-            query = str(request.parameters.get("query", "")).strip()
-            task_name = str(request.parameters.get("task_name", "")).strip()
-            if not query or not task_name:
-                return SamResult(
-                    status="failed",
-                    summary="Project name and delegated task are required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query or task name",
-                    next_action="ask_user",
-                    metadata={"intent": "execute_project_task", "source": request.source},
-                )
-            execute_result = self.project_planner.execute_task(
-                ProjectExecutionRequest(query=query, task_name=task_name)
-            )
-            execute_result.metadata.setdefault("intent", "execute_project_task")
-            execute_result.metadata.setdefault("source", request.source)
-            execute_result.metadata.setdefault("confidence", request.confidence)
-            return execute_result
-
-        if request.intent == "run_project":
-            query = str(request.parameters.get("query", "")).strip()
-            if request.parameters.get("use_memory"):
-                daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
-                query = (
-                    str(daily_state.get("last_project_id", {}).get("value", "")).strip()
-                    or str(daily_state.get("last_project_name", {}).get("value", "")).strip()
-                )
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Project name is required to run a project.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query",
-                    next_action="ask_user",
-                    metadata={"intent": "run_project", "source": request.source},
-                )
-            project_result, project = self.project_registry.find_project(query)
-            if not project_result.ok or project is None:
-                return self._service_result("run_project", project_result, metadata={"query": query})
-            if not project.run_command:
-                return SamResult(
-                    status="failed",
-                    summary=f"Project {project.name} does not have a run command configured.",
+                    summary="Intent is not registered.",
                     error_type=ErrorType.MISSING_CAPABILITY,
-                    error_message="missing run command",
-                    next_action="ask_user",
-                    metadata={
-                        "intent": "run_project",
-                        "project_id": project.project_id,
-                        "name": project.name,
-                        "source": request.source,
-                    },
-                )
-            worker_result, _task = self.tooling_worker.execute(
-                CommandSpec(
-                    name=f"run_project_{project.project_id}",
-                    worker_type="dev",
-                    command=project.run_command,
-                    description=f"Run project {project.name}",
-                    cwd=project.root_path,
-                    timeout_seconds=30,
-                )
-            )
-            worker_result.metadata.setdefault("intent", "run_project")
-            worker_result.metadata.setdefault("project_id", project.project_id)
-            worker_result.metadata.setdefault("name", project.name)
-            worker_result.metadata.setdefault("root_path", project.root_path)
-            worker_result.metadata.setdefault("run_command", project.run_command)
-            worker_result.metadata.setdefault("source", request.source)
-            worker_result.metadata.setdefault("confidence", request.confidence)
-            return worker_result
-
-        if request.intent == "open_project_folder":
-            query = str(request.parameters.get("query", "")).strip()
-            if request.parameters.get("use_memory"):
-                daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
-                query = (
-                    str(daily_state.get("last_project_id", {}).get("value", "")).strip()
-                    or str(daily_state.get("last_project_name", {}).get("value", "")).strip()
-                )
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Project name is required to open a project folder.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query",
-                    next_action="ask_user",
-                    metadata={"intent": "open_project_folder", "source": request.source},
-                )
-            project_result, project = self.project_registry.find_project(query)
-            if not project_result.ok or project is None:
-                return self._service_result("open_project_folder", project_result, metadata={"query": query})
-            if not Path(project.root_path).exists():
-                return SamResult(
-                    status="failed",
-                    summary=(
-                        f"I found project '{project.name}', but its folder is missing at {project.root_path}. "
-                        "Please choose another project or rescan your workspace."
-                    ),
-                    error_type=ErrorType.FILE_ACCESS_ERROR,
-                    error_message=project.root_path,
-                    next_action="ask_user",
-                    metadata={
-                        "intent": "open_project_folder",
-                        "project_id": project.project_id,
-                        "name": project.name,
-                        "root_path": project.root_path,
-                        "source": request.source,
-                        "confidence": request.confidence,
-                    },
-                )
-            open_result = self.project_inspector.tools.open_directory(project.root_path)
-            open_result.metadata.setdefault("intent", "open_project_folder")
-            open_result.metadata.setdefault("project_id", project.project_id)
-            open_result.metadata.setdefault("name", project.name)
-            open_result.metadata.setdefault("root_path", project.root_path)
-            open_result.metadata.setdefault("source", request.source)
-            open_result.metadata.setdefault("confidence", request.confidence)
-            return open_result
-
-        if request.intent == "open_folder":
-            query = str(request.parameters.get("query", "")).strip()
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Folder name or path is required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing folder query",
-                    next_action="ask_user",
-                    metadata={"intent": "open_folder", "source": request.source},
-                )
-            open_result = self.project_inspector.tools.open_directory_query(query)
-            open_result.metadata.setdefault("intent", "open_folder")
-            open_result.metadata.setdefault("source", request.source)
-            open_result.metadata.setdefault("confidence", request.confidence)
-            return open_result
-
-        if request.intent == "create_draft":
-            title = str(request.parameters.get("title", "")).strip()
-            body = str(request.parameters.get("body", "")).strip()
-            if not title or not body:
-                return SamResult(
-                    status="failed",
-                    summary="Draft title and body are required.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing title/body",
+                    error_message=request.intent,
                     next_action="ask_user",
                 )
-            result, draft = self.pipeline_service.create_draft(
-                title=title,
-                body=body,
-                content_type=request.parameters.get("content_type", "report"),
-            )
-            return self._service_result("create_draft", result, draft.id if draft else None)
+                self.conversation_state.writeback(result, state)
+                return result
 
-        if request.intent == "list_workflows":
-            result, drafts = self.pipeline_service.list_documents(limit=20)
-            return self._service_result(
-                "list_workflows",
-                result,
-                metadata={
-                    "count": len(drafts),
-                    "titles": [draft.title for draft in drafts],
-                },
-            )
+            approval_result = self._check_authority(request, capability.action_category)
+            if approval_result is not None:
+                self.conversation_state.writeback(approval_result, state)
+                return approval_result
 
-        if request.intent == "push_changes":
-            return self._request_push_approval(request)
+        # Runtime-first routing: use planner/executor whenever a registered tool exists.
+        if self._should_route_through_planner(request):
+            planned_result = self._execute_with_planner(request, memory_block)
+            planned_result.metadata.setdefault("source", request.source)
+            planned_result.metadata.setdefault("confidence", request.confidence)
+            self.conversation_state.writeback(planned_result, state)
+            return planned_result
 
-        if request.intent == "inspect_repo":
-            query = self._query_or_path_from_request(request)
-            if not query:
-                return SamResult(
-                    status="success",
-                    summary="I can inspect a repo, but I need the project path or registered project name first.",
-                    next_action="ask_user",
-                    metadata={
-                        "intent": "inspect_repo",
-                        "source": request.source,
-                        "confidence": request.confidence,
-                    },
-                )
-            inspect_result, inspection = self.project_inspector.inspect(query)
-            if not inspect_result.ok or inspection is None:
-                return self._service_result("inspect_repo", inspect_result, metadata={"query": query})
-            metadata = inspection_metadata(inspection)
-            metadata["intent"] = "inspect_repo"
-            metadata["source"] = request.source
-            metadata["confidence"] = request.confidence
-            changed_summary = (
-                "clean working tree"
-                if inspection.is_clean
-                else f"{len(inspection.changed_files)} changed file(s)"
-            )
-            return SamResult(
-                status="success",
-                summary=(
-                    f"{inspection.name} is on branch {inspection.branch or 'unknown'} with a "
-                    f"{changed_summary}."
-                ),
-                next_action="stop",
-                metadata=metadata,
-            )
-
-        if request.intent == "inspect_project_repo":
-            query = self._query_or_path_from_request(request)
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Project name is required for repo inspection.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query",
-                    next_action="ask_user",
-                    metadata={"intent": "inspect_project_repo", "source": request.source},
-                )
-            inspect_result, inspection = self.project_inspector.inspect(query)
-            if not inspect_result.ok or inspection is None:
-                return self._service_result("inspect_project_repo", inspect_result, metadata={"query": query})
-            metadata = inspection_metadata(inspection)
-            metadata["intent"] = "inspect_project_repo"
-            metadata["source"] = request.source
-            metadata["confidence"] = request.confidence
-            changed_summary = (
-                "clean working tree"
-                if inspection.is_clean
-                else f"{len(inspection.changed_files)} changed file(s)"
-            )
-            return SamResult(
-                status="success",
-                summary=(
-                    f"{inspection.name} is on branch {inspection.branch or 'unknown'} with a "
-                    f"{changed_summary}."
-                ),
-                next_action="stop",
-                metadata=metadata,
-            )
-
-        if request.intent == "inspect_git_state":
-            query = self._query_or_path_from_request(request)
-            if not query:
-                return SamResult(
-                    status="failed",
-                    summary="Project name is required for git inspection.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message="missing project query",
-                    next_action="ask_user",
-                    metadata={"intent": "inspect_git_state", "source": request.source},
-                )
-            project_result, project = self.project_registry.find_project(query)
-            project_id = ""
-            project_name = ""
-            repo_path = query
-            if project_result.ok and project is not None:
-                project_id = project.project_id
-                project_name = project.name
-                repo_path = project.root_path
-            else:
-                directory_result, directory = self.project_inspector.tools.resolve_directory_query(query)
-                if not directory_result.ok or directory is None:
-                    return self._service_result("inspect_git_state", project_result, metadata={"query": query})
-                project_name = directory.name
-                repo_path = str(directory)
-
-            git_result, snapshot = self.project_inspector.tools.inspect_git_state(repo_path)
-            if not git_result.ok or snapshot is None:
-                return self._service_result("inspect_git_state", git_result, metadata={"query": query})
-            return SamResult(
-                status="success",
-                summary=f"Git state for {project_name}: branch {snapshot.branch}, clean={snapshot.is_clean}.",
-                next_action="stop",
-                metadata={
-                    "intent": "inspect_git_state",
-                    "project_id": project_id,
-                    "name": project_name,
-                    "repo_root": snapshot.repo_root,
-                    "branch": snapshot.branch,
-                    "is_clean": snapshot.is_clean,
-                    "changed_files": snapshot.changed_files,
-                    "staged_files": snapshot.staged_files,
-                    "unstaged_files": snapshot.unstaged_files,
-                    "untracked_files": snapshot.untracked_files,
-                    "source": request.source,
-                    "confidence": request.confidence,
-                },
-            )
-
-        if request.intent == "scan_codebase_patterns":
-            query = self._query_or_path_from_request(request)
-            root_result, root = self._resolve_project_or_directory(query, memory_block)
-            if not root_result.ok or root is None:
-                return self._service_result("scan_codebase_patterns", root_result, metadata={"query": query})
-            patterns = self._patterns_from_request(request)
-            if not patterns:
-                return SamResult(
-                    status="success",
-                    summary="Which exact text patterns should I scan for?",
-                    next_action="ask_user",
-                    metadata={"intent": "scan_codebase_patterns", "root_path": str(root), "source": request.source},
-                )
-            scan_result, report = CodebaseCleanupService(root).inspect(patterns)
-            metadata = dict(scan_result.metadata)
-            metadata.update(
-                {
-                    "intent": "scan_codebase_patterns",
-                    "root_path": str(root),
-                    "patterns": patterns,
-                    "source": request.source,
-                    "confidence": request.confidence,
-                }
-            )
-            sample = report.matches[:10]
-            if scan_result.ok:
-                if sample:
-                    preview = "; ".join(
-                        f"{match.path}:{match.line_number} ({match.pattern})"
-                        for match in sample
-                    )
-                    summary = f"Found {len(report.matches)} match(es) for {', '.join(patterns)}. Sample: {preview}."
-                else:
-                    summary = f"No matches found for {', '.join(patterns)}."
-                scan_result.summary = summary
-            scan_result.metadata = metadata
-            return scan_result
-
-        if request.intent == "list_executor_tools":
-            tools = self.tool_executor.list_metadata()
-            names = [item.get("name", "") for item in tools if item.get("name")]
-            preview = ", ".join(names[:20])
-            if len(names) > 20:
-                preview += f", and {len(names) - 20} more"
-            return SamResult(
-                status="success",
-                summary=f"{len(names)} executor tool(s) registered: {preview}.",
-                next_action="stop",
-                metadata={"intent": "list_executor_tools", "tools": tools, "count": len(names)},
-            )
-
-        if request.intent == "list_worker_tasks":
-            tasks = sorted(worker_monitor.list_tasks(), key=lambda item: item.created_at, reverse=True)[:20]
-            task_items = [
-                {
-                    "task_id": task.task_id,
-                    "name": task.name,
-                    "worker_type": task.worker_type,
-                    "worker_name": task.worker_name,
-                    "description": task.description,
-                    "status": task.status,
-                    "elapsed_seconds": task.elapsed_seconds,
-                    "error_message": task.error_message,
-                    "last_output": task.output_lines[-3:],
-                }
-                for task in tasks
-            ]
-            if not task_items:
-                summary = "No worker tasks are currently recorded in this runtime session."
-            else:
-                preview = "; ".join(f"{item['worker_name']}:{item['status']}:{item['name']}" for item in task_items[:8])
-                summary = f"{len(task_items)} recent worker task(s): {preview}."
-            return SamResult(
-                status="success",
-                summary=summary,
-                next_action="stop",
-                metadata={"intent": "list_worker_tasks", "tasks": task_items, "count": len(task_items)},
-            )
-
-        if request.intent == "check_python_syntax":
-            query = self._query_or_path_from_request(request)
-            root_result, root = self._resolve_project_or_directory(query, memory_block)
-            if not root_result.ok or root is None:
-                return self._service_result("check_python_syntax", root_result, metadata={"query": query})
-            return self._check_python_syntax(root, request)
-
-        if request.intent == "inspect_recent_changes":
-            query = self._query_or_path_from_request(request)
-            root_result, root = self._resolve_project_or_directory(query, memory_block)
-            if not root_result.ok or root is None:
-                return self._service_result("inspect_recent_changes", root_result, metadata={"query": query})
-            return self._inspect_recent_changes(root, request)
-
-        if request.intent in {"plan_request", "autonomous_request"}:
-            return self._run_autonomous_loop(request, memory_block)
-
-        return SamResult(
-            status="success",
-            summary=request.response_text or "No actionable intent matched; treating as chat.",
-            next_action="stop",
-            metadata={
-                "intent": "chat",
-                "message": request.raw_text,
-                "source": request.source,
-                "confidence": request.confidence,
-            },
+        # Legacy compatibility path lives in a dedicated adapter.
+        return self.legacy_adapter.handle(
+            user_text=user_text,
+            request=request,
+            state=state,
+            memory_block=memory_block,
         )
 
     # ---------------------------------------------------------------------
     # =========================================================================
     # Phase 1: Executive Tool Registration
     # =========================================================================
+
+    def handle_compatibility(
+        self,
+        user_text: str,
+        memory_block: dict[str, Any] | None = None,
+        parsed_request: IntentRequest | None = None,
+        prechecked_authority: bool = False,
+    ) -> SamResult:
+        """Legacy compatibility executor path.
+
+        RuntimeExecutionEngine should be the default execution path.
+        """
+        result = self.handle(
+            user_text,
+            memory_block=memory_block,
+            parsed_request=parsed_request,
+            prechecked_authority=prechecked_authority,
+        )
+        result.metadata["execution_path"] = "legacy_router_compat"
+        return result
 
     def _register_executor_tools(self) -> None:
         """Register all tools/intents as executable handlers.
@@ -1196,15 +342,33 @@ class IntentRouter:
         """
         # Get available tools for planning context
         available_tools = self.tool_executor.available_tools
+        runtime_context = request.parameters.get("_runtime", {}) if isinstance(request.parameters, dict) else {}
+        goal_state = runtime_context.get("goal_state", {}) if isinstance(runtime_context, dict) else {}
+        recent_history = runtime_context.get("recent_history", []) if isinstance(runtime_context, dict) else []
+        observations: list[dict[str, Any]] = []
+        if isinstance(recent_history, list):
+            for item in recent_history[-3:]:
+                if isinstance(item, dict):
+                    observations.append(
+                        {
+                            "summary": str(item.get("summary", "")),
+                            "status": str(item.get("status", "")),
+                            "intent": str(item.get("intent", "")),
+                        }
+                    )
         
         # Create planning context with intent, available tools, and memory
         plan = self.task_planner.plan(
-            request.intent,
+            str(goal_state.get("current_objective", "")).strip() or request.raw_text or request.intent,
             context={
                 "request": request,
                 "memory": memory_block,
                 "intent": request.intent,
                 "available_tools": available_tools,
+                "goal_state": goal_state,
+                "runtime_context": runtime_context,
+                "recent_history": recent_history,
+                "observations": observations,
             }
         )
         
@@ -1218,6 +382,14 @@ class IntentRouter:
         result.metadata.setdefault("intent", request.intent)
         
         return result
+
+    def _should_route_through_planner(self, request: IntentRequest) -> bool:
+        excluded = {"chat", "clarify"}
+        if request.intent in excluded:
+            return False
+        if request.needs_clarification:
+            return False
+        return self.tool_executor.get(request.intent) is not None
 
     @staticmethod
     def _query_or_path_from_request(request: IntentRequest) -> str:
@@ -1250,234 +422,11 @@ class IntentRouter:
         request: IntentRequest,
         memory_block: dict[str, Any] | None,
     ) -> IntentRequest:
-        daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
-        last_file_path = str(daily_state.get("last_file_path", {}).get("value", "")).strip()
-        last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "")).strip()
-        last_runtime_intent = str(daily_state.get("last_runtime_intent", {}).get("value", "")).strip().lower()
-        last_runtime_summary = str(daily_state.get("last_runtime_summary", {}).get("value", "")).strip()
-        pending_scaffold_raw = memory_block.get("scaffold_pending", {}) if isinstance(memory_block, dict) else {}
-        if isinstance(pending_scaffold_raw, dict) and "value" in pending_scaffold_raw:
-            pending_scaffold_raw = pending_scaffold_raw.get("value", {})
-        pending_scaffold = pending_scaffold_raw if isinstance(pending_scaffold_raw, dict) else {}
-
-        if request.intent == "chat" and self._asks_about_known_projects(text):
-            request.intent = "list_projects"
-            request.parameters = {}
-            request.needs_clarification = False
-            request.clarification_question = ""
-
-        scaffold_followup = self._maybe_scaffold_followup(
+        return self.contextual_resolver.apply(
             text=text,
             request=request,
-            last_runtime_intent=last_runtime_intent,
-            last_runtime_summary=last_runtime_summary,
-            pending_scaffold=pending_scaffold,
+            memory_block=memory_block,
         )
-        if scaffold_followup is not None:
-            return scaffold_followup
-
-        if self._wants_summary(text):
-            path = str(request.parameters.get("path", "")).strip()
-            if not path:
-                path = self._path_from_text(text)
-            if not path and last_file_path:
-                path = last_file_path
-            if path:
-                request.intent = "read_file"
-                request.parameters["path"] = path
-                request.source = request.source or "context"
-
-        project_context_intents = {
-            "inspect_repo",
-            "inspect_project_repo",
-            "inspect_git_state",
-            "scan_codebase_patterns",
-            "check_python_syntax",
-            "inspect_recent_changes",
-            "read_file",
-            "list_directory",
-        }
-        if request.intent in project_context_intents and last_project_root:
-            has_location = any(str(request.parameters.get(key, "")).strip() for key in ("query", "path", "repo_path", "root_path"))
-            if not has_location and self._refers_to_current_context(text):
-                key = "path" if request.intent in {"read_file", "list_directory"} else "query"
-                request.parameters[key] = last_project_root
-
-        return request
-
-    @staticmethod
-    def _asks_about_known_projects(text: str) -> bool:
-        lowered = text.lower()
-        return (
-            ("project" in lowered or "projects" in lowered)
-            and any(token in lowered for token in ("completed", "finished", "done", "built"))
-        )
-
-    def _maybe_scaffold_followup(
-        self,
-        *,
-        text: str,
-        request: IntentRequest,
-        last_runtime_intent: str,
-        last_runtime_summary: str,
-        pending_scaffold: dict[str, Any],
-    ) -> IntentRequest | None:
-        lowered = text.lower().strip()
-        if not lowered:
-            return None
-
-        recent_scaffold_context = (
-            request.intent == "scaffold_project"
-            or "tic-tac-toe" in lowered
-            or "tictac" in lowered
-            or "new project" in lowered
-            or "new one" in lowered
-            or "create a new" in lowered
-            or bool(pending_scaffold)
-            or (
-                last_runtime_intent == "clarify"
-                and "new" in last_runtime_summary.lower()
-                and ("project" in last_runtime_summary.lower() or "tic-tac-toe" in last_runtime_summary.lower())
-            )
-        )
-        if not recent_scaffold_context:
-            return None
-
-        merged = {
-            "name": str(pending_scaffold.get("name", "")).strip(),
-            "project_type": str(pending_scaffold.get("project_type", "")).strip(),
-        }
-        extracted_type = self._extract_project_type(text)
-        extracted_name = self._extract_project_name(text)
-        if extracted_type:
-            merged["project_type"] = extracted_type
-        if extracted_name:
-            merged["name"] = extracted_name
-
-        asks_for_type = "type" in last_runtime_summary.lower()
-        asks_for_name = "name" in last_runtime_summary.lower() or "named" in last_runtime_summary.lower()
-
-        if merged["name"] and merged["project_type"]:
-            return IntentRequest(
-                intent="scaffold_project",
-                parameters={"name": merged["name"], "project_type": merged["project_type"]},
-                raw_text=text,
-                needs_clarification=False,
-                confidence=request.confidence,
-                source=request.source or "context",
-            )
-
-        if asks_for_type and merged["project_type"] and not merged["name"]:
-            return IntentRequest(
-                intent="clarify",
-                parameters={"pending_scaffold": merged},
-                raw_text=text,
-                needs_clarification=True,
-                clarification_question="What should I name the new project?",
-                confidence=request.confidence,
-                source=request.source or "context",
-            )
-
-        if asks_for_name and merged["name"] and not merged["project_type"]:
-            return IntentRequest(
-                intent="clarify",
-                parameters={"pending_scaffold": merged},
-                raw_text=text,
-                needs_clarification=True,
-                clarification_question="What project type should I use (for example: web app, python console app)?",
-                confidence=request.confidence,
-                source=request.source or "context",
-            )
-
-        if merged["name"] or merged["project_type"]:
-            return IntentRequest(
-                intent="clarify",
-                parameters={"pending_scaffold": merged},
-                raw_text=text,
-                needs_clarification=True,
-                clarification_question=(
-                    "I can create that project. I still need both a project name and type."
-                    if not merged["name"] and not merged["project_type"]
-                    else ("What should I name the new project?" if not merged["name"] else "What project type should I use?")
-                ),
-                confidence=request.confidence,
-                source=request.source or "context",
-            )
-
-        return None
-
-    @staticmethod
-    def _extract_project_type(text: str) -> str:
-        lowered = text.lower()
-        if "web app" in lowered or lowered == "web":
-            return "web app"
-        if "python console" in lowered or "console app" in lowered:
-            return "python console app"
-        if "flutter" in lowered:
-            return "flutter app"
-        if "html" in lowered:
-            return "html app"
-        return ""
-
-    @staticmethod
-    def _extract_project_name(text: str) -> str:
-        lowered = text.lower().strip()
-        direct = re.match(r"^(?:name\s+it|call\s+it)\s+(.+)$", lowered)
-        if direct:
-            return direct.group(1).strip()
-        generic = {"web app", "web", "python", "console app", "yes", "no", "create a new one", "new one"}
-        cleaned = text.strip().strip(".!,")
-        if not cleaned:
-            return ""
-        if lowered in generic:
-            return ""
-        if len(cleaned.split()) <= 4 and any(ch.isalnum() for ch in cleaned):
-            return cleaned
-        return ""
-
-    @staticmethod
-    def _path_from_text(text: str) -> str:
-        match = re.search(r"[A-Za-z]:[\\/][^\r\n\"']+", text)
-        if not match:
-            return ""
-        candidate = match.group(0).strip().rstrip(".,;")
-        while candidate:
-            path = Path(candidate)
-            if path.exists():
-                return str(path)
-            if " " in candidate:
-                candidate = candidate.rsplit(" ", 1)[0].rstrip(".,;")
-                continue
-            parent = str(path.parent)
-            if parent == candidate:
-                break
-            candidate = parent.rstrip("\\/")
-        return match.group(0).strip().rstrip(".,;")
-
-    @staticmethod
-    def _wants_summary(text: str) -> bool:
-        lowered = text.lower()
-        return any(token in lowered for token in ("summarize", "summary", "summarise", "summarized version", "summarised version"))
-
-    @staticmethod
-    def _summarize_text(content: str, label: str = "file") -> str:
-        normalized = re.sub(r"\s+", " ", content).strip()
-        if not normalized:
-            return f"{Path(label).name} is empty."
-
-        sentences = re.split(r"(?<=[.!?])\s+", normalized)
-        selected = [sentence.strip() for sentence in sentences if sentence.strip()][:4]
-        if not selected:
-            selected = [normalized[:500].strip()]
-        summary = " ".join(selected)
-        if len(summary) > 900:
-            summary = summary[:897].rstrip() + "..."
-        return f"Summary of {Path(label).name}: {summary}"
-
-    @staticmethod
-    def _refers_to_current_context(text: str) -> bool:
-        lowered = text.lower()
-        return any(phrase in lowered for phrase in ("this project", "this repo", "this file", "the project", "the repo", "it", "that project"))
 
     def _resolve_project_or_directory(
         self,
@@ -1653,6 +602,9 @@ class IntentRouter:
             except Exception as exc:
                 if observations:
                     return self._final_from_observations(request, observations, tool_trace, str(exc))
+                fallback = self._fallback_autonomous_read(request, memory_block, str(exc))
+                if fallback is not None:
+                    return fallback
                 return SamResult(
                     status="failed",
                     summary="Autonomous reasoning failed before I could choose a safe tool.",
@@ -1702,12 +654,14 @@ class IntentRouter:
             arguments = decision.get("arguments", {})
             if not isinstance(arguments, dict):
                 arguments = {}
-            worker_name, worker_type = self._autonomous_worker_identity(tool_name)
+            worker_identity = self._autonomous_worker_identity(tool_name)
             task = worker_monitor.create_task(
                 name=f"autonomous_{tool_name or 'unknown'}",
-                worker_type=worker_type,
-                worker_name=worker_name,
+                worker_type=worker_identity.role,
+                worker_name=worker_identity.name,
                 description=f"Autonomous step {step_index + 1}: {tool_name}",
+                worker_role=worker_identity.role,
+                responsibility=worker_identity.responsibility,
             )
             worker_monitor.mark_running(task.task_id)
             worker_monitor.append_output(task.task_id, f"Tool: {tool_name}")
@@ -1726,8 +680,10 @@ class IntentRouter:
                 {
                     "step": step_index + 1,
                     "tool": tool_name,
-                    "worker_name": worker_name,
-                    "worker_type": worker_type,
+                    "worker_name": worker_identity.name,
+                    "worker_type": worker_identity.role,
+                    "worker_role": worker_identity.role,
+                    "worker_responsibility": worker_identity.responsibility,
                     "arguments": arguments,
                     "status": tool_result.status,
                     "summary": tool_result.summary,
@@ -1749,6 +705,62 @@ class IntentRouter:
                 )
 
         return self._final_from_observations(request, observations, tool_trace, "")
+
+    def _fallback_autonomous_read(
+        self,
+        request: IntentRequest,
+        memory_block: dict[str, Any] | None,
+        reason: str,
+    ) -> SamResult | None:
+        roots = self._memory_roots(memory_block)
+        query = str(request.parameters.get("query", "") if isinstance(request.parameters, dict) else "").strip()
+        if query:
+            root_result, root = self._resolve_project_or_directory(query, memory_block)
+            if root_result.ok and root is not None:
+                roots.insert(0, str(root))
+        roots = list(dict.fromkeys(root for root in roots if root))
+        patterns = _autonomous_search_terms(request.raw_text)
+        if not roots or not patterns:
+            return None
+
+        root = Path(roots[0])
+        scan_result, report = CodebaseCleanupService(root).inspect(patterns)
+        matches = report.matches[:25]
+        if matches:
+            preview = "; ".join(f"{match.path}:{match.line_number} ({match.pattern})" for match in matches[:8])
+            summary = (
+                f"I could not use the reasoning model for tool choice, so I used the current project context. "
+                f"Found {len(report.matches)} match(es) for {', '.join(patterns)} in {root}: {preview}."
+            )
+        else:
+            summary = (
+                f"I could not use the reasoning model for tool choice, so I searched the current project context. "
+                f"No matches found for {', '.join(patterns)} in {root}."
+            )
+        return SamResult(
+            status="success" if scan_result.ok else scan_result.status,
+            summary=summary,
+            error_type=None if scan_result.ok else scan_result.error_type,
+            error_message=None if scan_result.ok else scan_result.error_message or reason,
+            next_action="stop" if scan_result.ok else "ask_user",
+            metadata={
+                "intent": "autonomous_request",
+                "source": "autonomous_fallback",
+                "fallback_reason": reason,
+                "root_path": str(root),
+                "patterns": patterns,
+                "match_count": len(report.matches),
+                "matches": [match.__dict__ for match in matches],
+                "observations": [
+                    {
+                        "step": 1,
+                        "tool": "scan_codebase_patterns",
+                        "status": scan_result.status,
+                        "summary": scan_result.summary,
+                    }
+                ],
+            },
+        )
 
     def _execute_autonomous_tool(
         self,
@@ -1961,15 +973,8 @@ class IntentRouter:
         ]
 
     @staticmethod
-    def _autonomous_worker_identity(tool_name: str) -> tuple[str, str]:
-        normalized = tool_name.lower()
-        if any(token in normalized for token in ("scan", "inspect", "read", "list")):
-            return "Inspector", "inspect"
-        if any(token in normalized for token in ("syntax", "compile", "health", "test")):
-            return "Nigel", "test"
-        if "recent_changes" in normalized or "git" in normalized:
-            return "Auditor", "inspect"
-        return "Coordinator", "planning"
+    def _autonomous_worker_identity(tool_name: str):
+        return resolve_worker_identity(tool_name=tool_name, action_category="read_data")
 
     @staticmethod
     def _memory_roots(memory_block: dict[str, Any] | None) -> list[str]:
@@ -2280,3 +1285,31 @@ class IntentRouter:
             next_action=result.next_action,
             metadata=merged_metadata,
         )
+
+
+def _autonomous_search_terms(text: str) -> list[str]:
+    words = re.findall(r"[A-Za-z0-9_.-]+", text.lower())
+    ignored = {
+        "a",
+        "an",
+        "are",
+        "can",
+        "check",
+        "could",
+        "due",
+        "for",
+        "in",
+        "is",
+        "it",
+        "me",
+        "may",
+        "please",
+        "the",
+        "their",
+        "this",
+        "to",
+        "when",
+        "you",
+    }
+    terms = [word for word in words if len(word) > 2 and word not in ignored]
+    return list(dict.fromkeys(terms))[:6]

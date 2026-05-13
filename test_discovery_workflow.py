@@ -369,6 +369,55 @@ def test_non_discovery_message_does_not_get_hijacked_by_stale_discovery() -> Non
         assert result.metadata.get("intent") != "discovery_workflow"
 
 
+def test_discovery_uses_project_name_not_pronoun_from_long_request() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        (root / "Estate").mkdir()
+        (root / "sam-v2-clean").mkdir()
+        router = _router(root, "chat")
+
+        with patch("workflows.discovery.Path.cwd", return_value=root / "sam-v2-clean"):
+            result = router.handle(
+                "I have a task for you on the estate app. please find it in the Darey folder let me know when you have found it"
+            )
+
+        assert result.ok, result
+        assert result.metadata["search_keyword"] == "estate"
+        assert _candidate_names(result) == ["Estate"]
+
+
+def test_discovery_accepts_user_provided_matching_project_path() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        estate = root / "Estate"
+        estate.mkdir()
+        router = _router(root, "chat")
+        first = router.handle("can you find the estate app")
+
+        result = router.handle(f"heres the project {estate}", _memory_from(first))
+
+        assert result.ok, result
+        assert result.metadata["workflow_action"] == "accept_provided_candidate"
+        assert result.metadata["selected_candidate"] == str(estate)
+        assert result.metadata["root_path"] == str(estate)
+        assert result.next_action == "stop"
+
+
+def test_discovery_can_describe_active_goal() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        estate = root / "Estate"
+        estate.mkdir()
+        router = _router(root, "chat")
+        first = router.handle("can you find the estate app")
+
+        result = router.handle("I just gave the estate project what are you lookign for again", _memory_from(first))
+
+        assert result.ok, result
+        assert result.metadata["workflow_action"] == "describe_active_goal"
+        assert "estate" in result.summary.lower()
+
+
 if __name__ == "__main__":
     try:
         test_discovery_asks_for_root_before_opening()

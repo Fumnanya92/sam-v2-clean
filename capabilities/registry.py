@@ -316,4 +316,11 @@ def build_default_registry() -> CapabilityRegistry:
             action_category="read_data",
         )
     )
+    registry.register(
+        Capability(
+            intent="discovery_workflow",
+            description="Continue a project or folder discovery goal.",
+            action_category="read_data",
+        )
+    )
     return registry

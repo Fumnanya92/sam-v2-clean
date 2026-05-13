@@ -10,6 +10,8 @@ Each tool is registered with the executor, taking a payload dict containing:
 
 from __future__ import annotations
 
+from pathlib import Path
+import re
 from typing import Any
 
 from approvals import ApprovalManager, AuthorityEngine
@@ -17,7 +19,28 @@ from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
 from projects import ProjectExecutionRequest, ProjectPlanRequest, ProjectScaffoldRequest, inspection_metadata
 from storage import TaskRecord, create_task, list_tasks, update_task
+from tools import CodebaseCleanupService
 from workers import CommandSpec
+
+
+def _wants_summary(text: str) -> bool:
+    lowered = text.lower()
+    return any(token in lowered for token in ("summarize", "summary", "summarise", "summarized version", "summarised version"))
+
+
+def _summarize_text(content: str, label: str = "file") -> str:
+    normalized = re.sub(r"\s+", " ", content).strip()
+    if not normalized:
+        return f"{Path(label).name} is empty."
+
+    sentences = re.split(r"(?<=[.!?])\s+", normalized)
+    selected = [sentence.strip() for sentence in sentences if sentence.strip()][:4]
+    if not selected:
+        selected = [normalized[:500].strip()]
+    summary = " ".join(selected)
+    if len(summary) > 900:
+        summary = summary[:897].rstrip() + "..."
+    return f"Summary of {Path(label).name}: {summary}"
 
 
 def register_all_executor_tools(router: Any) -> None:
@@ -288,9 +311,9 @@ def register_all_executor_tools(router: Any) -> None:
         preview = "\n".join(lines[:10])
         if len(lines) > 10:
             preview += f"\n... ({len(lines) - 10} more lines)"
-        wants_summary = router._wants_summary(request.raw_text) if request else False
+        wants_summary = _wants_summary(request.raw_text) if request else False
         summary = (
-            router._summarize_text(content, path_text)
+            _summarize_text(content, path_text)
             if wants_summary
             else f"File read: {len(content)} chars, {len(lines)} lines.\n{preview}"
         )
@@ -665,6 +688,21 @@ def register_all_executor_tools(router: Any) -> None:
         project_result, project = router.project_registry.find_project(query)
         if not project_result.ok or project is None:
             return router._service_result("open_project_folder", project_result, metadata={"query": query})
+        if not router.project_inspector.tools.resolve_directory_query(project.root_path)[0].ok:
+            return SamResult(
+                status="failed",
+                summary=f"Project folder is missing: {project.root_path}",
+                error_type=ErrorType.FILE_ACCESS_ERROR,
+                error_message=project.root_path,
+                next_action="ask_user",
+                metadata={
+                    "intent": "open_project_folder",
+                    "query": query,
+                    "project_id": project.project_id,
+                    "name": project.name,
+                    "root_path": project.root_path,
+                },
+            )
         open_result = router.project_inspector.tools.open_directory(project.root_path)
         open_result.metadata.setdefault("intent", "open_project_folder")
         open_result.metadata.setdefault("project_id", project.project_id)
@@ -974,6 +1012,132 @@ def register_all_executor_tools(router: Any) -> None:
         "inspect_repo",
         _inspect_repo_handler,
         description="Inspect a repository (needs project path)",
+        action_category="read_data",
+    )
+
+    def _scan_codebase_patterns_handler(payload: dict[str, Any] | None = None) -> SamResult:
+        request = payload.get("request") if payload else None
+        memory_block = payload.get("memory") if payload else None
+        if request is None:
+            return SamResult(
+                status="failed",
+                summary="Request context is required for codebase scanning.",
+                error_type=ErrorType.TOOL_FAILED,
+                error_message="missing request",
+                next_action="ask_user",
+                metadata={"intent": "scan_codebase_patterns"},
+            )
+        query = str(request.parameters.get("query", "") or request.parameters.get("path", "")).strip()
+        root_result, root = router._resolve_project_or_directory(query, memory_block)
+        if not root_result.ok or root is None:
+            return router._service_result("scan_codebase_patterns", root_result, metadata={"query": query})
+        patterns = router._patterns_from_request(request)
+        if not patterns:
+            return SamResult(
+                status="failed",
+                summary="Search patterns are required.",
+                error_type=ErrorType.TOOL_FAILED,
+                error_message="missing patterns",
+                next_action="ask_user",
+                metadata={"intent": "scan_codebase_patterns", "root_path": str(root)},
+            )
+        scan_result, report = CodebaseCleanupService(root).inspect(patterns)
+        scan_result.metadata.update(
+            {
+                "intent": "scan_codebase_patterns",
+                "root_path": str(root),
+                "patterns": patterns,
+                "matches": [match.__dict__ for match in report.matches[:100]],
+                "match_count": len(report.matches),
+            }
+        )
+        return scan_result
+
+    executor.register(
+        "scan_codebase_patterns",
+        _scan_codebase_patterns_handler,
+        description="Scan a project or directory for text patterns",
+        action_category="read_data",
+    )
+
+    def _check_python_syntax_handler(payload: dict[str, Any] | None = None) -> SamResult:
+        request = payload.get("request") if payload else None
+        memory_block = payload.get("memory") if payload else None
+        if request is None:
+            return SamResult(
+                status="failed",
+                summary="Request context is required for Python syntax checks.",
+                error_type=ErrorType.TOOL_FAILED,
+                error_message="missing request",
+                next_action="ask_user",
+                metadata={"intent": "check_python_syntax"},
+            )
+        query = str(request.parameters.get("query", "") or request.parameters.get("path", "")).strip()
+        root_result, root = router._resolve_project_or_directory(query, memory_block)
+        if not root_result.ok or root is None:
+            return router._service_result("check_python_syntax", root_result, metadata={"query": query})
+        return router._check_python_syntax(root, request)
+
+    executor.register(
+        "check_python_syntax",
+        _check_python_syntax_handler,
+        description="Parse Python files without writing bytecode",
+        action_category="read_data",
+    )
+
+    def _autonomous_request_handler(payload: dict[str, Any] | None = None) -> SamResult:
+        request = payload.get("request") if payload else None
+        memory_block = payload.get("memory") if payload else None
+        if request is None:
+            return SamResult(
+                status="failed",
+                summary="Request context is required for autonomous work.",
+                error_type=ErrorType.TOOL_FAILED,
+                error_message="missing request",
+                next_action="ask_user",
+                metadata={"intent": "autonomous_request"},
+            )
+        return router._run_autonomous_loop(request, memory_block)
+
+    executor.register(
+        "autonomous_request",
+        _autonomous_request_handler,
+        description="Run an observation-driven read-only autonomous loop",
+        action_category="read_data",
+    )
+
+    def _discovery_workflow_handler(payload: dict[str, Any] | None = None) -> SamResult:
+        request = payload.get("request") if payload else None
+        memory_block = payload.get("memory") if payload else None
+        if request is None:
+            return SamResult(
+                status="failed",
+                summary="Request context is required for discovery.",
+                error_type=ErrorType.TOOL_FAILED,
+                error_message="missing request",
+                next_action="ask_user",
+                metadata={"intent": "discovery_workflow"},
+            )
+        parsed_intent = str(request.parameters.get("_discovery_parsed_intent", request.intent)).strip()
+        result = router.discovery_workflow.maybe_handle(
+            request.raw_text,
+            parsed_intent=parsed_intent,
+            parsed_parameters=request.parameters,
+            memory_block=memory_block,
+        )
+        if result is not None:
+            return result
+        return SamResult(
+            status="success",
+            summary="I need a bit more detail to continue discovery.",
+            next_action="ask_user",
+            metadata={"intent": "discovery_workflow"},
+        )
+
+    executor.register(
+        "discovery_workflow",
+        _discovery_workflow_handler,
+        description="Continue project and folder discovery goals",
         action_category="read_data",
     )
 

@@ -33,6 +33,7 @@ _FILLER_WORDS = {
     "here",
     "inside",
     "in",
+    "it",
     "me",
     "only",
     "please",
@@ -43,6 +44,7 @@ _FILLER_WORDS = {
     "to",
     "with",
     "you",
+    "your",
 }
 _ORDINALS = {
     "first": 0,
@@ -162,6 +164,8 @@ class DiscoveryWorkflow:
             return self._ask_for_root(state)
 
         if state.is_active:
+            if _asks_current_discovery_goal(text):
+                return self._describe_active_goal(state)
             if selection is not None:
                 return self._open_or_inspect_candidate(state, selection, text)
             if _explicitly_wants_open(text):
@@ -171,6 +175,9 @@ class DiscoveryWorkflow:
                 if state.candidates:
                     return self._ask_for_selection(state)
             if path:
+                provided = Path(path)
+                if _path_matches_keyword(provided, state.search_keyword):
+                    return self._accept_provided_candidate(state, provided)
                 return self._list_and_filter_root(state, path)
             if filter_keyword or _looks_like_filter_followup(text) or _mentions_keyword(text, state.search_keyword):
                 if filter_keyword:
@@ -291,6 +298,50 @@ class DiscoveryWorkflow:
         if state.search_root:
             return self._list_and_filter_root(state, state.search_root)
         return self._ask_for_root(state)
+
+    def _describe_active_goal(self, state: DiscoveryState) -> SamResult:
+        location = f" in {state.search_root}" if state.search_root else ""
+        candidate_text = ""
+        if state.candidates:
+            names = ", ".join(Path(path).name for path in state.candidates[:5])
+            candidate_text = f" Current candidate(s): {names}."
+        summary = f"I am looking for a project or folder matching '{state.search_keyword}'{location}.{candidate_text}"
+        return SamResult(
+            status="success",
+            summary=summary,
+            next_action="ask_user",
+            metadata=self._metadata(
+                "describe_active_goal",
+                state,
+                [
+                    trace_step("Active discovery goal", observation=state.active_goal),
+                    trace_step("Keyword in focus", observation=state.search_keyword),
+                ],
+            ),
+        )
+
+    def _accept_provided_candidate(self, state: DiscoveryState, path: Path) -> SamResult:
+        state.search_root = str(path.parent)
+        state.selected_candidate = str(path)
+        state.candidates = [str(path)]
+        state.last_listing = [str(path)]
+        summary = f"Found the project folder matching '{state.search_keyword}': {path}."
+        return SamResult(
+            status="success",
+            summary=summary,
+            next_action="stop",
+            metadata=self._metadata(
+                "accept_provided_candidate",
+                state,
+                [
+                    trace_step("Path resolved", path=str(path)),
+                    trace_step("Candidate accepted", path=str(path), reason="Provided path matches active discovery keyword"),
+                ],
+            ) | {
+                "path": str(path),
+                "root_path": str(path),
+            },
+        )
 
     def _present_candidates(self, state: DiscoveryState, *, action: str, trace: list[dict[str, Any]] | None = None) -> SamResult:
         count = len(state.candidates)
@@ -446,6 +497,41 @@ def _path_from_text(text: str) -> str:
     return match.group(0).strip().rstrip(".,;")
 
 
+def should_route_discovery(
+    text: str,
+    *,
+    parsed_intent: str = "",
+    memory_block: dict[str, Any] | None = None,
+) -> bool:
+    """Pure routing predicate for the runtime/parser layer.
+
+    Discovery execution stays in DiscoveryWorkflow; this function only says
+    whether the current turn belongs to an active or newly-started discovery
+    goal.
+    """
+    state = DiscoveryState.from_memory(memory_block)
+    path = _path_from_text(text) or _natural_root_from_text(text)
+    selection = _selection_index(text)
+    filter_keyword = _keyword_from_filter(text)
+    start_keyword = filter_keyword or _keyword_from_discovery_goal(text)
+
+    if start_keyword and _looks_like_fresh_discovery_start(text) and parsed_intent not in _INSPECTION_INTENTS:
+        return True
+
+    if state.is_active:
+        return bool(
+            selection is not None
+            or _explicitly_wants_open(text)
+            or path
+            or _asks_current_discovery_goal(text)
+            or filter_keyword
+            or _looks_like_filter_followup(text)
+            or _mentions_keyword(text, state.search_keyword)
+        )
+
+    return bool(path and parsed_intent == "list_directory")
+
+
 def _natural_root_from_text(text: str) -> str:
     lowered = text.lower()
     base_map = {
@@ -525,9 +611,53 @@ def _keyword_from_filter(text: str) -> str:
 
 
 def _keyword_from_discovery_goal(text: str) -> str:
+    direct_target = _keyword_before_target_word(text, ("app", "project", "repo", "directory"))
+    if direct_target:
+        return direct_target
+    folder_target = _keyword_before_target_word(text, ("folder",))
+    if folder_target:
+        return folder_target
     words = _words(text)
-    useful = [word for word in words if word not in _FILLER_WORDS and word not in _DISCOVERY_VERBS and word not in _TARGET_WORDS]
+    useful = [
+        word
+        for word in words
+        if word not in _FILLER_WORDS
+        and word not in _DISCOVERY_VERBS
+        and word not in _TARGET_WORDS
+        and not _looks_like_path_word(word)
+    ]
     return useful[-1] if useful else ""
+
+
+def _keyword_before_target_word(text: str, targets: tuple[str, ...]) -> str:
+    target_pattern = "|".join(re.escape(target) for target in targets)
+    matches = re.findall(rf"\b([A-Za-z0-9_.-]+)\s+(?:{target_pattern})s?\b", text, flags=re.IGNORECASE)
+    for raw in matches:
+        token = raw.strip(" .,:;!?`'\"").lower()
+        if token and token not in _FILLER_WORDS and token not in _DISCOVERY_VERBS and token not in _TARGET_WORDS:
+            return token
+    return ""
+
+
+def _asks_current_discovery_goal(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        ("what" in lowered and any(token in lowered for token in ("looking for", "lookign for", "searching for")))
+        or "what are you trying to find" in lowered
+        or "what was the folder" in lowered
+    )
+
+
+def _path_matches_keyword(path: Path, keyword: str) -> bool:
+    if not keyword:
+        return False
+    name = path.name.lower()
+    needle = keyword.lower().strip()
+    return needle == name or needle in name
+
+
+def _looks_like_path_word(word: str) -> bool:
+    return bool(re.fullmatch(r"[a-z]:", word.lower()))
 
 
 def _words(text: str) -> list[str]:

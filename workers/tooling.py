@@ -18,7 +18,7 @@ from storage.db import log_audit_event
 from storage.models import AuditEvent
 
 from .monitor import WorkerTask, worker_monitor
-from .names import resolve_worker_name
+from .names import resolve_worker_identity
 
 
 def _debug_print(message: str) -> None:
@@ -75,12 +75,20 @@ class ToolingWorker:
         self.approval_manager = approval_manager or ApprovalManager(self.db_path)
 
     def execute(self, spec: CommandSpec) -> tuple[SamResult, WorkerTask]:
-        worker_name = resolve_worker_name(spec.worker_type, spec.worker_name)
+        identity = resolve_worker_identity(
+            spec.worker_type,
+            spec.worker_name,
+            tool_name=spec.name,
+            action_category=spec.action_category,
+        )
+        worker_name = identity.name
         task = worker_monitor.create_task(
             name=spec.name,
-            worker_type=spec.worker_type,
+            worker_type=identity.role,
             worker_name=worker_name,
             description=spec.description,
+            worker_role=identity.role,
+            responsibility=identity.responsibility,
         )
         run_logger = RunLogger(f"sam_v2 worker {worker_name} {spec.name}")
         action_logger = ActionLogger(f"sam_v2 worker {worker_name} {spec.name}", correlation_id=run_logger.run_id)
@@ -384,12 +392,20 @@ class ToolingWorker:
             return (result, worker_monitor.get_task(task.task_id) or task)
 
     def execute_edit(self, spec: FileEditSpec) -> tuple[SamResult, WorkerTask]:
-        worker_name = resolve_worker_name(spec.worker_type, spec.worker_name)
+        identity = resolve_worker_identity(
+            spec.worker_type,
+            spec.worker_name,
+            tool_name=spec.name,
+            action_category=spec.action_category,
+        )
+        worker_name = identity.name
         task = worker_monitor.create_task(
             name=spec.name,
-            worker_type=spec.worker_type,
+            worker_type=identity.role,
             worker_name=worker_name,
             description=spec.description,
+            worker_role=identity.role,
+            responsibility=identity.responsibility,
         )
         run_logger = RunLogger(f"sam_v2 worker {worker_name} {spec.name}")
         action_logger = ActionLogger(f"sam_v2 worker {worker_name} {spec.name}", correlation_id=run_logger.run_id)
@@ -646,12 +662,20 @@ class ToolingWorker:
             return (result, worker_monitor.get_task(task.task_id) or task)
 
     def execute_write(self, spec: FileWriteSpec) -> tuple[SamResult, WorkerTask]:
-        worker_name = resolve_worker_name(spec.worker_type, spec.worker_name)
+        identity = resolve_worker_identity(
+            spec.worker_type,
+            spec.worker_name,
+            tool_name=spec.name,
+            action_category=spec.action_category,
+        )
+        worker_name = identity.name
         task = worker_monitor.create_task(
             name=spec.name,
-            worker_type=spec.worker_type,
+            worker_type=identity.role,
             worker_name=worker_name,
             description=spec.description,
+            worker_role=identity.role,
+            responsibility=identity.responsibility,
         )
         run_logger = RunLogger(f"sam_v2 worker {worker_name} {spec.name}")
         action_logger = ActionLogger(f"sam_v2 worker {worker_name} {spec.name}", correlation_id=run_logger.run_id)

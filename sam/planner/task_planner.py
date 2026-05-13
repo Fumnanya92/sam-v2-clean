@@ -26,6 +26,17 @@ class PlanningStepStatus(str, Enum):
     failed = "failed"
 
 
+class PlanAction(str, Enum):
+    execute = "execute"
+    continue_flow = "continue"
+    retry = "retry"
+    clarify = "clarify"
+    stop = "stop"
+    switch_tool = "switch_tool"
+    delegate = "delegate"
+    synthesize = "synthesize"
+
+
 @dataclass(slots=True)
 class PlanningStep:
     """A single step in a multi-step execution plan.
@@ -63,6 +74,7 @@ class TaskPlan:
     payload: dict[str, Any] = field(default_factory=dict)
     mode: str = "direct"  # "direct" or "multi_step"
     multi_step_plan: MultiStepPlan | None = None
+    plan_action: PlanAction = PlanAction.execute
 
 
 class TaskPlanner:
@@ -88,20 +100,43 @@ class TaskPlanner:
         normalized_request = request.strip()
         context_data = dict(context or {})
         available_tools = self._normalize_available_tools(context_data.get("available_tools"))
+        runtime_context = context_data.get("runtime_context", {})
+        if not isinstance(runtime_context, dict):
+            runtime_context = {}
+        goal_state = context_data.get("goal_state", {})
+        if not isinstance(goal_state, dict):
+            goal_state = {}
         requested_tool = self._first_present(
+            runtime_context.get("requested_tool"),
             context_data.get("tool_name"),
             context_data.get("intent"),
             context_data.get("capability"),
         )
+        runtime_decision = str(runtime_context.get("decision", "")).strip().lower()
+        if runtime_decision in {"continue", "retry"}:
+            requested_tool = self._first_present(goal_state.get("current_tool"), requested_tool)
 
-        # Determine if this is a simple or complex task
-        is_complex = self._is_complex_request(normalized_request, available_tools)
-        mode = "multi_step" if is_complex else "direct"
+        plan_action = self._plan_action_from_context(runtime_context, goal_state)
+        # Explicit tool requests already have an execution target. Keep those
+        # direct so metadata and tool observations are not swallowed by generic
+        # planner-only steps.
+        has_explicit_tool = bool(requested_tool)
+        is_complex = False if has_explicit_tool else self._is_complex_request(normalized_request, available_tools)
+        mode = "multi_step" if is_complex and plan_action == PlanAction.execute else "direct"
         
         payload: dict[str, Any] = {
-            "request": normalized_request,
+            "request": context_data.get("request", normalized_request),
             "context": context_data,
+            "runtime_context": runtime_context,
+            "goal_state": goal_state,
         }
+        request_obj = context_data.get("request")
+        request_parameters = getattr(request_obj, "parameters", None)
+        if isinstance(request_parameters, dict):
+            payload.update({key: value for key, value in request_parameters.items() if not str(key).startswith("_")})
+        memory_block = context_data.get("memory")
+        if memory_block is not None:
+            payload["memory"] = memory_block
         
         # For multi-step, generate execution steps
         multi_step_plan = None
@@ -119,7 +154,26 @@ class TaskPlanner:
             payload=payload,
             mode=mode,
             multi_step_plan=multi_step_plan,
+            plan_action=plan_action,
         )
+
+    def _plan_action_from_context(self, runtime_context: dict[str, Any], goal_state: dict[str, Any]) -> PlanAction:
+        decision = str(runtime_context.get("decision", "")).strip().lower()
+        decision_map = {
+            "continue": PlanAction.continue_flow,
+            "retry": PlanAction.retry,
+            "clarify": PlanAction.clarify,
+            "stop": PlanAction.stop,
+            "delegate": PlanAction.delegate,
+            "switch_tool": PlanAction.switch_tool,
+            "synthesize": PlanAction.synthesize,
+            "execute": PlanAction.execute,
+        }
+        if decision in decision_map:
+            return decision_map[decision]
+        if str(goal_state.get("next_expected_action", "")).strip().lower() == "ask_user":
+            return PlanAction.clarify
+        return PlanAction.execute
 
     def _is_complex_request(self, request: str, available_tools: set[str]) -> bool:
         """Determine if a request requires multi-step planning.

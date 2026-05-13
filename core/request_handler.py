@@ -19,7 +19,10 @@ from memory.session import save_session_state
 from storage.db import log_audit_event
 from storage.models import AuditEvent
 
+from .goal_state import GoalState
+from .execution_engine import RuntimeExecutionEngine
 from .session import RuntimeSession
+from .workflow_runtime import WorkflowRuntime
 
 
 class RequestHandler:
@@ -45,6 +48,8 @@ class RequestHandler:
             authority_engine=authority_engine,
             approval_manager=self.approval_manager,
         )
+        self.execution_engine = RuntimeExecutionEngine(self.router)
+        self.workflow_runtime = WorkflowRuntime()
 
     def handle(self, user_text: str, session: RuntimeSession) -> SamResult:
         run_logger = RunLogger("sam_v2 core request")
@@ -106,7 +111,25 @@ class RequestHandler:
             summary_logger.write(result, metadata={"session_id": session.session_id})
             return result
 
-        result = ensure_trace(self.router.handle(text, memory_block=_memory))
+        parsed_hint = self.router.parse(text, _memory)
+        result = ensure_trace(
+            self.workflow_runtime.run_turn(
+                user_text=text,
+                parsed_hint=parsed_hint,
+                memory_block=_memory,
+                authorize=self._authorize_request,
+                execute=lambda req: self.execution_engine.execute(
+                    req,
+                    memory_block=_memory,
+                    legacy_execute=lambda legacy_req: self.router.handle_compatibility(
+                        text,
+                        memory_block=_memory,
+                        parsed_request=legacy_req,
+                        prechecked_authority=True,
+                    ),
+                ),
+            )
+        )
         # Preserve router-produced conversation state; synthesize only when missing.
         conversation_state_updates = result.metadata.get("conversation_state")
         if not isinstance(conversation_state_updates, dict):
@@ -146,6 +169,8 @@ class RequestHandler:
         scaffold_pending = result.metadata.get("pending_scaffold")
         scaffold_payload = {"value": scaffold_pending} if isinstance(scaffold_pending, dict) else {"value": {}}
         conversation_state_payload = {"value": conversation_state_updates} if isinstance(conversation_state_updates, dict) else {"value": {}}
+        goal_state = result.metadata.get("goal_state")
+        goal_state_payload = {"value": goal_state} if isinstance(goal_state, dict) else {"value": GoalState().to_memory()}
         if result.metadata.get("intent") == "scaffold_project":
             if result.metadata.get("project_id"):
                 daily_state_updates["last_created_project_id"] = result.metadata.get("project_id", "")
@@ -178,6 +203,7 @@ class RequestHandler:
                 "discovery": discovery_payload,
                 "scaffold_pending": scaffold_payload,
                 "conversation_state": conversation_state_payload,
+                "goal_state": goal_state_payload,
                 "conversation": {"recent_requests": recent_requests},
             },
             audit_db_path=self.db_path,
@@ -309,3 +335,27 @@ class RequestHandler:
             next_action=next_action or base_result.next_action,
             metadata=metadata,
         )
+
+    def _authorize_request(self, request: object) -> SamResult | None:
+        if not hasattr(request, "intent"):
+            return None
+        intent = str(getattr(request, "intent", "")).strip()
+        if not intent:
+            return None
+        if intent in {"chat", "clarify"}:
+            # Let router/runtime follow-up resolution run before capability gating.
+            return None
+        capability = self.router.registry.get(intent)
+        if capability is None:
+            # Planner-executable tools are allowed during migration even if capability registry lags.
+            if self.router.tool_executor.get(intent) is not None:
+                return None
+            return SamResult(
+                status="failed",
+                summary="Intent is not registered.",
+                error_type=ErrorType.MISSING_CAPABILITY,
+                error_message=intent,
+                next_action="ask_user",
+                metadata={"intent": intent},
+            )
+        return self.router._check_authority(request, capability.action_category)

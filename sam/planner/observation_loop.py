@@ -16,7 +16,8 @@ from enum import Enum
 from typing import Any, Mapping
 
 from diagnostics.result import SamResult
-from sam.planner.task_planner import TaskPlan, TaskPlanner, PlanningStep, PlanningStepStatus
+from diagnostics.error_types import ErrorType
+from sam.planner.task_planner import PlanAction, TaskPlan, TaskPlanner, PlanningStep, PlanningStepStatus
 
 
 class ContinueDecision(str, Enum):
@@ -83,6 +84,9 @@ class ObservationLoop:
             Tuple of (final result, list of step executions)
         """
         executions: list[StepExecution] = []
+        policy_result = self._result_for_plan_action(plan)
+        if policy_result is not None:
+            return policy_result
         
         # Direct mode: single step
         if plan.mode == "direct" or plan.multi_step_plan is None:
@@ -118,7 +122,7 @@ class ObservationLoop:
             return SamResult(
                 status="failed",
                 summary=f"Execution failed: {str(e)}",
-                error_type="EXECUTION_ERROR",
+                error_type=ErrorType.TOOL_FAILED,
                 error_message=str(e),
                 next_action="stop",
             )
@@ -131,6 +135,7 @@ class ObservationLoop:
         """Execute multi-step plan with observation loop."""
         executions: list[StepExecution] = []
         retry_counts: dict[int, int] = {}
+        runtime_hint = self._runtime_decision_hint(plan)
         
         step_idx = 0
         while step_idx < len(plan.multi_step_plan.steps):
@@ -156,7 +161,7 @@ class ObservationLoop:
             observations = self._extract_observations(result)
             
             # Make continuation decision
-            decision = self._decide_continuation(observations, retry_count)
+            decision = self._decide_continuation(observations, retry_count, runtime_hint=runtime_hint)
             
             # Record execution
             execution = StepExecution(step, result, observations, decision)
@@ -214,7 +219,13 @@ class ObservationLoop:
             raw_result=result,
         )
     
-    def _decide_continuation(self, observations: ObservationData, retry_count: int) -> ContinueDecision:
+    def _decide_continuation(
+        self,
+        observations: ObservationData,
+        retry_count: int,
+        *,
+        runtime_hint: str = "",
+    ) -> ContinueDecision:
         """Decide what to do next based on observations.
         
         Decision tree:
@@ -225,6 +236,14 @@ class ObservationLoop:
         """
         if observations.success:
             return ContinueDecision.continue_next
+
+        if runtime_hint == "clarify":
+            return ContinueDecision.ask_user
+
+        if runtime_hint == "retry":
+            if retry_count < self.max_retries:
+                return ContinueDecision.retry_current
+            return ContinueDecision.ask_user
         
         if retry_count < self.max_retries:
             return ContinueDecision.retry_current
@@ -235,6 +254,69 @@ class ObservationLoop:
             return ContinueDecision.skip_remaining
         
         return ContinueDecision.ask_user
+
+    @staticmethod
+    def _runtime_decision_hint(plan: TaskPlan) -> str:
+        payload = plan.payload if isinstance(plan.payload, dict) else {}
+        runtime_context = payload.get("runtime_context", {})
+        if not isinstance(runtime_context, dict):
+            return ""
+        return str(runtime_context.get("decision", "")).strip().lower()
+
+    def _result_for_plan_action(self, plan: TaskPlan) -> tuple[SamResult, list[StepExecution]] | None:
+        if plan.plan_action in {PlanAction.execute, PlanAction.continue_flow, PlanAction.retry}:
+            return None
+        if plan.plan_action == PlanAction.clarify:
+            return (
+                SamResult(
+                    status="success",
+                    summary="I need a bit more detail before continuing.",
+                    next_action="ask_user",
+                    metadata={"execution_mode": "policy", "plan_action": plan.plan_action.value},
+                ),
+                [],
+            )
+        if plan.plan_action == PlanAction.stop:
+            return (
+                SamResult(
+                    status="success",
+                    summary="Stopping here based on runtime policy.",
+                    next_action="stop",
+                    metadata={"execution_mode": "policy", "plan_action": plan.plan_action.value},
+                ),
+                [],
+            )
+        if plan.plan_action == PlanAction.synthesize:
+            return (
+                SamResult(
+                    status="success",
+                    summary="Synthesizing from recent observations.",
+                    next_action="stop",
+                    metadata={"execution_mode": "policy", "plan_action": plan.plan_action.value},
+                ),
+                [],
+            )
+        if plan.plan_action == PlanAction.delegate:
+            return (
+                SamResult(
+                    status="success",
+                    summary="Delegation requested by planner policy.",
+                    next_action="ask_user",
+                    metadata={"execution_mode": "policy", "plan_action": plan.plan_action.value},
+                ),
+                [],
+            )
+        if plan.plan_action == PlanAction.switch_tool:
+            return (
+                SamResult(
+                    status="success",
+                    summary="Planner recommends switching tools before execution.",
+                    next_action="retry",
+                    metadata={"execution_mode": "policy", "plan_action": plan.plan_action.value},
+                ),
+                [],
+            )
+        return None
 
 
 def create_observation_loop(planner: TaskPlanner, executor: Any) -> ObservationLoop:

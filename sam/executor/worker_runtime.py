@@ -14,22 +14,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
 from diagnostics.trace import append_trace, trace_step
 from workers.monitor import WorkerMonitor, worker_monitor
+from workers.names import WorkerIdentity, resolve_worker_identity
 
 
-def _worker_identity_for_tool(tool_name: str) -> tuple[str, str]:
-    normalized = tool_name.lower()
-    if any(token in normalized for token in ("scan", "inspect", "read", "list", "details")):
-        return "Inspector", "inspect"
-    if any(token in normalized for token in ("test", "syntax", "health", "compile")):
-        return "Nigel", "test"
-    if any(token in normalized for token in ("plan", "delegation", "progress", "status")):
-        return "Coordinator", "planning"
-    if any(token in normalized for token in ("run", "execute")):
-        return "Priase", "dev"
-    return "ToolExecutor", "executor"
+def _worker_identity_for_tool(tool_name: str, action_category: str = "") -> WorkerIdentity:
+    return resolve_worker_identity(tool_name=tool_name, action_category=action_category)
 
 
 class WorkerExecutionContext:
@@ -40,14 +33,16 @@ class WorkerExecutionContext:
         self.monitor = worker_monitor_instance or worker_monitor
         self.task = None
     
-    def start(self, description: str = "") -> None:
+    def start(self, description: str = "", action_category: str = "") -> None:
         """Create and start a worker task."""
-        worker_name, worker_type = _worker_identity_for_tool(self.tool_name)
+        identity = _worker_identity_for_tool(self.tool_name, action_category)
         self.task = self.monitor.create_task(
             name=f"execute_{self.tool_name}",
-            worker_type=worker_type,
-            worker_name=worker_name,
+            worker_type=identity.role,
+            worker_name=identity.name,
             description=description or f"Execute {self.tool_name}",
+            worker_role=identity.role,
+            responsibility=identity.responsibility,
         )
         self.monitor.mark_running(self.task.task_id)
     
@@ -117,8 +112,10 @@ class WorkerCentricExecutor:
         
         Returns the tool result with worker metadata attached.
         """
+        tool_def = self.executor.get(tool_name)
+        action_category = str(getattr(tool_def, "action_category", "")) if tool_def is not None else ""
         context = WorkerExecutionContext(tool_name, self.monitor)
-        context.start(description=f"Executing tool: {tool_name}")
+        context.start(description=f"Executing tool: {tool_name}", action_category=action_category)
         
         try:
             # Extract request info for observation
@@ -149,15 +146,17 @@ class WorkerCentricExecutor:
                 
                 # Attach worker metadata
                 result.metadata.setdefault("worker_task_id", context.task.task_id if context.task else None)
-                result.metadata.setdefault("worker_name", context.task.worker_name if context.task else "ToolExecutor")
-                result.metadata.setdefault("worker_type", context.task.worker_type if context.task else "executor")
+                result.metadata.setdefault("worker_name", context.task.worker_name if context.task else "Orbit")
+                result.metadata.setdefault("worker_type", context.task.worker_type if context.task else "orchestration")
+                result.metadata.setdefault("worker_role", context.task.worker_role if context.task else "orchestration")
+                result.metadata.setdefault("worker_responsibility", context.task.responsibility if context.task else "orchestration and supervision")
                 append_trace(
                     result,
                     trace_step(
                         "Worker delegated",
                         tool=tool_name,
                         action="execute_with_tracking",
-                        observation=context.task.worker_name if context.task else "ToolExecutor",
+                        observation=context.task.worker_name if context.task else "Orbit",
                     ),
                 )
             
@@ -172,14 +171,16 @@ class WorkerCentricExecutor:
                 SamResult(
                 status="failed",
                 summary=f"Tool execution failed: {tool_name}",
-                error_type="EXECUTION_ERROR",
+                error_type=ErrorType.TOOL_FAILED,
                 error_message=error_msg,
                 next_action="stop",
                 metadata={
                     "tool": tool_name,
                     "worker_task_id": context.task.task_id if context.task else None,
-                    "worker_name": context.task.worker_name if context.task else "ToolExecutor",
-                    "worker_type": context.task.worker_type if context.task else "executor",
+                    "worker_name": context.task.worker_name if context.task else "Orbit",
+                    "worker_type": context.task.worker_type if context.task else "orchestration",
+                    "worker_role": context.task.worker_role if context.task else "orchestration",
+                    "worker_responsibility": context.task.responsibility if context.task else "orchestration and supervision",
                 },
                 ),
                 trace_step("Tool execution failed", status="failed", tool=tool_name, observation=error_msg),

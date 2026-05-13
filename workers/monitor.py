@@ -16,6 +16,8 @@ class WorkerTask:
     worker_type: str
     worker_name: str
     description: str
+    worker_role: str = ""
+    responsibility: str = ""
     status: str = "pending"
     output_lines: list[str] = field(default_factory=list)
     error_message: str = ""
@@ -36,13 +38,24 @@ class WorkerMonitor:
         self._tasks: dict[str, WorkerTask] = {}
         self._callbacks: list[Callable[[WorkerTask], None]] = []
 
-    def create_task(self, *, name: str, worker_type: str, worker_name: str, description: str) -> WorkerTask:
+    def create_task(
+        self,
+        *,
+        name: str,
+        worker_type: str,
+        worker_name: str,
+        description: str,
+        worker_role: str = "",
+        responsibility: str = "",
+    ) -> WorkerTask:
         task = WorkerTask(
             task_id=str(uuid4())[:8],
             name=name,
             worker_type=worker_type,
             worker_name=worker_name,
             description=description,
+            worker_role=worker_role,
+            responsibility=responsibility,
         )
         with self._lock:
             self._tasks[task.task_id] = task

@@ -43,6 +43,11 @@ class _FakeModel:
         return action
 
 
+class _FailingActionModel(_FakeModel):
+    def choose_autonomous_action(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise ValueError("bad model output")
+
+
 def _router(
     root: Path,
     intent: str,
@@ -119,6 +124,26 @@ def test_autonomous_loop_can_tool_then_answer() -> None:
         assert result.metadata["intent"] == "autonomous_request"
         assert result.metadata["autonomous_steps"] == 1
         assert "I found TOKEN" in result.summary
+
+
+def test_autonomous_loop_falls_back_to_current_project_scan_when_model_action_fails() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        (root / "levies.txt").write_text("Residents May levies are due on May 31.\n", encoding="utf-8")
+        router = IntentRouter(
+            db_path=root / "sam.db",
+            workspace_root=root,
+            model_client=_FailingActionModel("autonomous_request", {}),
+        )
+        memory = {"daily_state": {"last_project_root_path": {"value": str(root)}}}
+
+        result = router.handle("can you check when the residents may levies are due", memory)
+
+        assert result.ok, result
+        assert result.metadata["source"] == "autonomous_fallback"
+        assert result.metadata["root_path"] == str(root)
+        assert result.metadata["match_count"] >= 1
+        assert "levies" in result.summary.lower()
 
 
 if __name__ == "__main__":

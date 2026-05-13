@@ -212,6 +212,34 @@ class NativeShellController:
 
     def _task_lines(self, r: SamResult) -> list[str]:
         out = [r.summary, f"Next: {r.next_action or 'stop'}"]
+        runtime_events = r.metadata.get("runtime_events", [])
+        if isinstance(runtime_events, list) and runtime_events:
+            out.append("Runtime events:")
+            for event in runtime_events[:16]:
+                if not isinstance(event, dict):
+                    continue
+                event_type = str(event.get("type", "")).strip()
+                if event_type == "runtime.input":
+                    out.append(f"Input: {event.get('message', '')}")
+                elif event_type == "runtime.action":
+                    out.append(f"Action: intent={event.get('intent', '')} source={event.get('source', '')}")
+                elif event_type == "runtime.result":
+                    line = f"Result: {event.get('status', '')} next={event.get('next_action', '')}"
+                    if event.get("tool"):
+                        line += f" tool={event.get('tool')}"
+                    if event.get("error"):
+                        line += f" error={event.get('error')}"
+                    out.append(line)
+                else:
+                    label = str(event.get("label", "")).strip() or "event"
+                    line = f"{label}: {event.get('status', '')}".strip()
+                    if event.get("action"):
+                        line += f" action={event.get('action')}"
+                    if event.get("observation"):
+                        line += f" observed={event.get('observation')}"
+                    if event.get("reason"):
+                        line += f" reason={event.get('reason')}"
+                    out.append(line)
         trace = r.metadata.get("execution_trace", [])
         if isinstance(trace, list) and trace:
             out.append("Execution trace:")
@@ -336,18 +364,22 @@ class NativeShellController:
                 continue
             seen = self._seen_workers.get(task.task_id, -1)
             if seen == -1:
+                role = task.worker_role or task.worker_type
+                detail = f" [{role}]" if role else ""
+                if task.responsibility:
+                    detail += f" - {task.responsibility}"
                 self.task_popup.append_line(
-                    f"Delegated to {task.worker_name} [{task.worker_type}] -> {task.description}"
+                    f"[{task.worker_name}]{detail}: {task.description}"
                 )
                 self._seen_workers[task.task_id] = 0
                 seen = 0
             for line in task.output_lines[seen:]:
-                self.task_popup.append_line(f"{task.worker_name}: {line}")
+                self.task_popup.append_line(f"[{task.worker_name}] {line}")
             self._seen_workers[task.task_id] = len(task.output_lines)
             if task.status == "done" and seen < len(task.output_lines):
-                self.task_popup.append_line(f"{task.worker_name} finished.")
+                self.task_popup.append_line(f"[{task.worker_name}] finished.")
             elif task.status == "failed" and seen < len(task.output_lines):
-                self.task_popup.append_line(f"{task.worker_name} failed: {task.error_message}")
+                self.task_popup.append_line(f"[{task.worker_name}] failed: {task.error_message}")
 
     # ── window layout ─────────────────────────────────────────────────────────
 
