@@ -8,11 +8,13 @@ caller-provided patterns and optionally apply caller-provided replacements.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 
 from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
 from workers import worker_monitor
+from workers.names import resolve_worker_identity
 
 
 DEFAULT_EXTENSIONS = {
@@ -37,7 +39,18 @@ DEFAULT_IGNORED_DIRS = {
     "node_modules",
     "logs",
     "workspace/runtime",
+    ".dart_tool",
+    ".gradle",
+    ".idea",
+    ".vscode",
+    "build",
+    "dist",
+    "coverage",
+    "Pods",
+    "DerivedData",
 }
+
+_IGNORED_DIR_NAMES = {item for item in DEFAULT_IGNORED_DIRS if "/" not in item}
 
 
 @dataclass
@@ -60,16 +73,21 @@ class CodebaseCleanupService:
         self.repo_root = Path(repo_root).resolve()
 
     def inspect(self, patterns: list[str]) -> tuple[SamResult, CodebaseCleanupReport]:
+        identity = resolve_worker_identity(tool_name="scan_codebase_patterns", action_category="read_data")
         task = worker_monitor.create_task(
             name="inspect_codebase_patterns",
-            worker_type="codebase",
-            worker_name="Inspector",
+            worker_type=identity.role,
+            worker_name=identity.name,
             description="Inspect codebase for requested patterns.",
+            worker_role=identity.role,
+            responsibility=identity.responsibility,
         )
         worker_monitor.mark_running(task.task_id)
 
         report = CodebaseCleanupReport()
         clean_patterns = [item for item in (p.strip() for p in patterns) if item]
+        worker_monitor.append_output(task.task_id, f"Root: {self.repo_root}")
+        worker_monitor.append_output(task.task_id, f"Patterns: {', '.join(clean_patterns) if clean_patterns else '(none)'}")
         if not clean_patterns:
             result = SamResult(
                 status="failed",
@@ -83,15 +101,20 @@ class CodebaseCleanupService:
 
         for path in self._iter_source_files():
             report.scanned_files += 1
+            if report.scanned_files == 1 or report.scanned_files % 25 == 0:
+                worker_monitor.append_output(task.task_id, f"Scanning file {report.scanned_files}: {path.relative_to(self.repo_root).as_posix()}")
             try:
                 lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
             except OSError:
+                worker_monitor.append_output(task.task_id, f"Skipped unreadable file: {path.relative_to(self.repo_root).as_posix()}")
                 continue
             rel_path = path.relative_to(self.repo_root).as_posix()
             for line_number, line in enumerate(lines, start=1):
                 lowered = line.lower()
                 for pattern in clean_patterns:
                     if pattern.lower() in lowered:
+                        if len(report.matches) < 10:
+                            worker_monitor.append_output(task.task_id, f"Match: {rel_path}:{line_number} ({pattern})")
                         report.matches.append(
                             CodebaseMatch(
                                 path=rel_path,
@@ -114,8 +137,8 @@ class CodebaseCleanupService:
                     "match_count": len(report.matches),
                     "matches": [match.__dict__ for match in report.matches[:100]],
                     "worker_updates": [
-                        f"Inspector scanned {report.scanned_files} file(s).",
-                        f"Inspector found {len(report.matches)} match(es).",
+                        f"{identity.name} scanned {report.scanned_files} file(s).",
+                        f"{identity.name} found {len(report.matches)} match(es).",
                     ],
                 },
             ),
@@ -123,11 +146,14 @@ class CodebaseCleanupService:
         )
 
     def replace(self, replacements: dict[str, str]) -> tuple[SamResult, CodebaseCleanupReport]:
+        identity = resolve_worker_identity(tool_name="replace_codebase_patterns", action_category="write_data")
         task = worker_monitor.create_task(
             name="replace_codebase_patterns",
-            worker_type="codebase",
-            worker_name="Refactorer",
+            worker_type=identity.role,
+            worker_name=identity.name,
             description="Apply requested codebase replacements.",
+            worker_role=identity.role,
+            responsibility=identity.responsibility,
         )
         worker_monitor.mark_running(task.task_id)
 
@@ -173,8 +199,8 @@ class CodebaseCleanupService:
                     "scanned_files": report.scanned_files,
                     "changed_files": report.changed_files,
                     "worker_updates": [
-                        f"Refactorer scanned {report.scanned_files} file(s).",
-                        f"Refactorer changed {len(report.changed_files)} file(s).",
+                        f"{identity.name} scanned {report.scanned_files} file(s).",
+                        f"{identity.name} changed {len(report.changed_files)} file(s).",
                     ],
                 },
             ),
@@ -182,12 +208,31 @@ class CodebaseCleanupService:
         )
 
     def _iter_source_files(self):
-        for path in self.repo_root.rglob("*"):
-            if not path.is_file():
+        for current_root, dir_names, file_names in os.walk(self.repo_root):
+            current = Path(current_root)
+            try:
+                rel_root = current.relative_to(self.repo_root).as_posix()
+            except ValueError:
                 continue
-            rel = path.relative_to(self.repo_root).as_posix()
-            if any(rel == ignored or rel.startswith(f"{ignored}/") for ignored in DEFAULT_IGNORED_DIRS):
-                continue
-            if path.suffix.lower() not in DEFAULT_EXTENSIONS:
-                continue
-            yield path
+            if rel_root == ".":
+                rel_root = ""
+
+            dir_names[:] = [
+                name
+                for name in dir_names
+                if name not in _IGNORED_DIR_NAMES
+                and not _is_ignored_rel_path(f"{rel_root}/{name}".strip("/"))
+            ]
+
+            for file_name in file_names:
+                path = current / file_name
+                rel = path.relative_to(self.repo_root).as_posix()
+                if _is_ignored_rel_path(rel):
+                    continue
+                if path.suffix.lower() not in DEFAULT_EXTENSIONS:
+                    continue
+                yield path
+
+
+def _is_ignored_rel_path(rel_path: str) -> bool:
+    return any(rel_path == ignored or rel_path.startswith(f"{ignored}/") for ignored in DEFAULT_IGNORED_DIRS)

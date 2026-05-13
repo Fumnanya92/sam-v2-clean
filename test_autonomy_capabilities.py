@@ -144,6 +144,54 @@ def test_autonomous_loop_falls_back_to_current_project_scan_when_model_action_fa
         assert result.metadata["root_path"] == str(root)
         assert result.metadata["match_count"] >= 1
         assert "levies" in result.summary.lower()
+        assert "match(es)" not in result.summary
+
+
+def test_autonomous_fallback_prefers_explicit_path_and_plain_english() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        stale = root / "OldProject"
+        estate = root / "Estate"
+        stale.mkdir()
+        estate.mkdir()
+        (stale / "notes.txt").write_text("levies due nowhere\n", encoding="utf-8")
+        (estate / "levies.txt").write_text("May resident levies use due_date June 1.\n", encoding="utf-8")
+        router = IntentRouter(
+            db_path=root / "sam.db",
+            workspace_root=root,
+            model_client=_FailingActionModel("autonomous_request", {}),
+        )
+        memory = {"daily_state": {"last_project_root_path": {"value": str(stale)}}}
+
+        result = router.handle(
+            f"need you to check when the residents may levies are due in the estate app {estate}",
+            memory,
+        )
+
+        assert result.ok, result
+        assert result.metadata["root_path"] == str(estate)
+        assert "users" not in result.metadata["patterns"]
+        assert "app" not in result.metadata["patterns"]
+        assert "match(es)" not in result.summary
+        assert "strongest places to inspect next" in result.summary.lower()
+
+
+def test_autonomous_tool_sanitizes_html_escaped_paths() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        estate = root / "Estate"
+        estate.mkdir()
+        router = _router(root, "autonomous_request", {})
+
+        result = router.autonomous_runtime.execute_tool(
+            "list_directory",
+            {"path": f"{estate}&#x27;"},
+            router.parse("list it"),
+            {},
+        )
+
+        assert result.ok, result
+        assert result.metadata["path"] == str(estate)
 
 
 if __name__ == "__main__":

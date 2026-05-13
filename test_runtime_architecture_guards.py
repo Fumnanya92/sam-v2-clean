@@ -94,3 +94,27 @@ def test_chat_like_requests_use_legacy_compatibility_path() -> None:
         result = runtime.handle_text("hello")
         assert result.ok
         assert result.metadata.get("execution_path") == "legacy_router_compat"
+
+
+def test_router_does_not_own_autonomous_runtime_loop() -> None:
+    router_source = Path("intents/router.py").read_text(encoding="utf-8")
+    assert "_run_autonomous_loop" not in router_source
+    assert "_execute_autonomous_tool" not in router_source
+    assert "choose_autonomous_action" not in router_source
+
+    runtime_source = Path("core/autonomous_runtime.py").read_text(encoding="utf-8")
+    assert "class AutonomousRuntime" in runtime_source
+    assert "choose_autonomous_action" in runtime_source
+
+
+def test_autonomous_runtime_uses_operational_tool_registry() -> None:
+    runtime_source = Path("core/autonomous_runtime.py").read_text(encoding="utf-8")
+    execute_body = runtime_source.split("    def execute_tool(", 1)[1].split("    def tool_manifest(", 1)[0]
+
+    assert "self.tool_registry.execute" in execute_body
+    assert "if tool_name ==" not in execute_body
+    assert "if tool_name in" not in execute_body
+
+    registry_source = Path("core/operational_tools.py").read_text(encoding="utf-8")
+    assert "class OperationalToolRegistry" in registry_source
+    assert "build_default_operational_registry" in registry_source

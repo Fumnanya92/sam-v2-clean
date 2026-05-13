@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import html
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -35,7 +36,7 @@ class SafeLocalTools:
 
     @staticmethod
     def resolve_directory_query(query: str | Path) -> tuple[SamResult, Path | None]:
-        raw = str(query).strip()
+        raw = _clean_path_query(query)
         if not raw:
             return (
                 SamResult(
@@ -185,7 +186,7 @@ class SafeLocalTools:
         *,
         additional_roots: list[str | Path] | None = None,
     ) -> tuple[SamResult, Path | None]:
-        raw = str(query).strip()
+        raw = _clean_path_query(query)
         if not raw:
             return (
                 SamResult(
@@ -254,7 +255,7 @@ class SafeLocalTools:
         )
 
     def list_directory(self, path: str | Path) -> tuple[SamResult, list[str]]:
-        target = Path(path)
+        target = Path(_clean_path_query(path))
         try:
             if not target.exists() or not target.is_dir():
                 return (
@@ -296,7 +297,7 @@ class SafeLocalTools:
             )
 
     def open_directory(self, path: str | Path) -> SamResult:
-        target = Path(path)
+        target = Path(_clean_path_query(path))
         try:
             if not target.exists() or not target.is_dir():
                 return SamResult(
@@ -346,7 +347,7 @@ class SafeLocalTools:
         return open_result
 
     def open_file(self, path: str | Path) -> SamResult:
-        target = Path(path)
+        target = Path(_clean_path_query(path))
         try:
             if not target.exists() or not target.is_file():
                 return SamResult(
@@ -500,7 +501,7 @@ class SafeLocalTools:
             )
 
     def inspect_git_state(self, repo_path: str | Path) -> tuple[SamResult, GitStatusSnapshot | None]:
-        repo = Path(repo_path)
+        repo = Path(_clean_path_query(repo_path))
         git_base = ["git", "-c", f"safe.directory={repo}"]
         inside_result, inside_payload = self.run_safe_command(
             [*git_base, "rev-parse", "--is-inside-work-tree"],
@@ -585,3 +586,13 @@ class SafeLocalTools:
             )
         except Exception:
             pass
+
+
+def _clean_path_query(value: str | Path) -> str:
+    cleaned = str(value).strip()
+    for _ in range(5):
+        unescaped = html.unescape(cleaned)
+        if unescaped == cleaned:
+            break
+        cleaned = unescaped
+    return cleaned.strip().strip("'\"`")

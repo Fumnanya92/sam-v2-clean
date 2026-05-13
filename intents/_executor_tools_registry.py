@@ -1097,7 +1097,7 @@ def register_all_executor_tools(router: Any) -> None:
                 next_action="ask_user",
                 metadata={"intent": "autonomous_request"},
             )
-        return router._run_autonomous_loop(request, memory_block)
+        return router.autonomous_runtime.run(request, memory_block)
 
     executor.register(
         "autonomous_request",
