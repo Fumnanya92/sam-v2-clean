@@ -122,14 +122,14 @@ def test_autonomous_loop_can_tool_then_answer() -> None:
 
         assert result.ok, result
         assert result.metadata["intent"] == "autonomous_request"
-        assert result.metadata["autonomous_steps"] == 1
-        assert "I found TOKEN" in result.summary
+        assert result.metadata["autonomous_steps"] == 2
+        assert "TOKEN = 'alpha'" in result.summary
 
 
 def test_autonomous_loop_falls_back_to_current_project_scan_when_model_action_fails() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
-        (root / "levies.txt").write_text("Residents May levies are due on May 31.\n", encoding="utf-8")
+        (root / "billing_rules.txt").write_text("The renewal fee grace window ends on day 14.\n", encoding="utf-8")
         router = IntentRouter(
             db_path=root / "sam.db",
             workspace_root=root,
@@ -137,13 +137,13 @@ def test_autonomous_loop_falls_back_to_current_project_scan_when_model_action_fa
         )
         memory = {"daily_state": {"last_project_root_path": {"value": str(root)}}}
 
-        result = router.handle("can you check when the residents may levies are due", memory)
+        result = router.handle("can you check when the renewal fee grace window ends", memory)
 
         assert result.ok, result
         assert result.metadata["source"] == "autonomous_fallback"
         assert result.metadata["root_path"] == str(root)
         assert result.metadata["match_count"] >= 1
-        assert "levies" in result.summary.lower()
+        assert "renewal" in result.summary.lower()
         assert "match(es)" not in result.summary
 
 
@@ -151,11 +151,11 @@ def test_autonomous_fallback_prefers_explicit_path_and_plain_english() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
         stale = root / "OldProject"
-        estate = root / "Estate"
+        target = root / "TargetProject"
         stale.mkdir()
-        estate.mkdir()
-        (stale / "notes.txt").write_text("levies due nowhere\n", encoding="utf-8")
-        (estate / "levies.txt").write_text("May resident levies use due_date June 1.\n", encoding="utf-8")
+        target.mkdir()
+        (stale / "notes.txt").write_text("renewal fee unknown\n", encoding="utf-8")
+        (target / "billing_rules.txt").write_text("The renewal fee grace window ends on day 14.\n", encoding="utf-8")
         router = IntentRouter(
             db_path=root / "sam.db",
             workspace_root=root,
@@ -164,34 +164,191 @@ def test_autonomous_fallback_prefers_explicit_path_and_plain_english() -> None:
         memory = {"daily_state": {"last_project_root_path": {"value": str(stale)}}}
 
         result = router.handle(
-            f"need you to check when the residents may levies are due in the estate app {estate}",
+            f"need you to check when the renewal fee grace window ends in this app {target}",
             memory,
         )
 
         assert result.ok, result
-        assert result.metadata["root_path"] == str(estate)
+        assert result.metadata["root_path"] == str(target)
         assert "users" not in result.metadata["patterns"]
         assert "app" not in result.metadata["patterns"]
         assert "match(es)" not in result.summary
-        assert "strongest places to inspect next" in result.summary.lower()
+        assert "strongest evidence" in result.summary.lower()
+        assert "day 14" in result.summary
+
+
+def test_autonomous_loop_overrides_irrelevant_model_read_file_choice() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        project = root / "TargetProject"
+        project.mkdir()
+        (project / "todo.md").write_text("The renewal project review is still open.\n", encoding="utf-8")
+        (project / "billing_rules.txt").write_text("The renewal fee grace window ends on day 14.\n", encoding="utf-8")
+        router = _router(
+            root,
+            "autonomous_request",
+            {},
+            actions=[
+                {
+                    "action": "tool",
+                    "tool": "scan_codebase_patterns",
+                    "arguments": {"query": str(project), "patterns": ["renewal", "fee", "grace", "window"]},
+                },
+                {
+                    "action": "tool",
+                    "tool": "read_file",
+                    "arguments": {"path": str(project / "todo.md"), "max_chars": 10000},
+                },
+            ],
+        )
+
+        result = router.handle(f"when does the renewal fee grace window end? check {project}")
+
+        assert result.ok, result
+        assert str(result.metadata.get("path", "")).endswith("billing_rules.txt")
+        assert "todo.md" not in result.summary
+
+
+def test_autonomous_loop_requires_evidence_reads_before_final_answer() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        project = root / "TargetProject"
+        project.mkdir()
+        (project / "todo.md").write_text("The renewal project review is still open.\n", encoding="utf-8")
+        (project / "src").mkdir()
+        (project / "src" / "current_rule.ts").write_text(
+            "\n".join(
+                [
+                    "export function dueDateForMonth(month: string) {",
+                    "  if (month === '2026-05') {",
+                    "    return '2026-06-01';",
+                    "  }",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (project / "src" / "legacy_rule.ts").write_text(
+            "export const legacyRule = '2026-05 can use the end of the current month in older jobs';\n",
+            encoding="utf-8",
+        )
+        router = _router(
+            root,
+            "autonomous_request",
+            {},
+            actions=[
+                {
+                    "action": "tool",
+                    "tool": "scan_codebase_patterns",
+                    "arguments": {"query": str(project), "patterns": ["renewal", "dueDate", "2026-05"]},
+                },
+                {"action": "final", "answer": "done"},
+                {"action": "final", "answer": "done"},
+                {"action": "final", "answer": "done"},
+            ],
+        )
+
+        result = router.handle(f"when is the renewal due for 2026-05? check {project}")
+
+        assert result.ok, result
+        trace = result.metadata["tool_trace"]
+        assert trace[0]["tool"] == "scan_codebase_patterns"
+        assert trace[1]["tool"] == "read_file_region"
+        assert result.metadata["autonomous_steps"] >= 2
+        assert "current_rule.ts" in result.summary
+        assert "2026-06-01" in result.summary
+        assert result.summary != "done"
+
+
+def test_autonomous_loop_lets_model_repair_stale_project_memory() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        stale = root / "workspace" / "projects" / "old_app"
+        target = root / "TargetProject"
+        target.mkdir()
+        (target / "rules.txt").write_text("The renewal fee grace window ends on day 14.\n", encoding="utf-8")
+        router = _router(
+            root,
+            "autonomous_request",
+            {},
+            actions=[
+                {
+                    "action": "tool",
+                    "tool": "scan_codebase_patterns",
+                    "arguments": {
+                        "query": f"{stale}&#x27;",
+                        "patterns": ["renewal", "fee", "grace", "window"],
+                    },
+                },
+                {
+                    "action": "tool",
+                    "tool": "scan_codebase_patterns",
+                    "arguments": {
+                        "query": str(target),
+                        "patterns": ["renewal", "fee", "grace", "window"],
+                    },
+                },
+                {"action": "final", "answer": "done"},
+            ],
+        )
+        memory = {"daily_state": {"last_project_root_path": {"value": str(stale)}}}
+
+        result = router.handle(f"check the renewal fee grace window in TargetProject app", memory)
+
+        assert result.ok, result
+        assert result.metadata["root_path"] == str(target)
+        assert "day 14" in result.summary
+        trace = result.metadata["tool_trace"]
+        assert trace[0]["status"] == "failed"
+        assert trace[1]["status"] == "success"
+
+
+def test_autonomous_loop_does_not_stop_on_failed_tool_echo_final() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        missing = root / "missing_project"
+        router = _router(
+            root,
+            "autonomous_request",
+            {},
+            actions=[
+                {
+                    "action": "tool",
+                    "tool": "scan_codebase_patterns",
+                    "arguments": {
+                        "query": str(missing),
+                        "patterns": ["renewal", "fee"],
+                    },
+                },
+                {"action": "final", "answer": "Project or directory could not be resolved."},
+            ],
+        )
+
+        result = router.handle("check the renewal fee in the project")
+
+        assert result.ok, result
+        assert result.next_action == "ask_user"
+        assert result.metadata["intent"] == "clarify"
+        assert result.metadata["autonomous_steps"] == 1
+        assert result.metadata["tool_trace"][0]["status"] == "failed"
 
 
 def test_autonomous_tool_sanitizes_html_escaped_paths() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
-        estate = root / "Estate"
-        estate.mkdir()
+        project = root / "TargetProject"
+        project.mkdir()
         router = _router(root, "autonomous_request", {})
 
         result = router.autonomous_runtime.execute_tool(
             "list_directory",
-            {"path": f"{estate}&#x27;"},
+            {"path": f"{project}&#x27;"},
             router.parse("list it"),
             {},
         )
 
         assert result.ok, result
-        assert result.metadata["path"] == str(estate)
+        assert result.metadata["path"] == str(project)
 
 
 if __name__ == "__main__":

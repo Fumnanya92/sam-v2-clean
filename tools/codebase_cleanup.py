@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 from diagnostics.error_types import ErrorType
+from diagnostics.permission_errors import is_permission_error
 from diagnostics.result import SamResult
 from workers import worker_monitor
 from workers.names import resolve_worker_identity
@@ -66,11 +67,13 @@ class CodebaseCleanupReport:
     scanned_files: int = 0
     matches: list[CodebaseMatch] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
+    skipped_paths: list[dict[str, str]] = field(default_factory=list)
 
 
 class CodebaseCleanupService:
     def __init__(self, repo_root: str | Path) -> None:
         self.repo_root = Path(repo_root).resolve()
+        self._walk_errors: list[dict[str, str]] = []
 
     def inspect(self, patterns: list[str]) -> tuple[SamResult, CodebaseCleanupReport]:
         identity = resolve_worker_identity(tool_name="scan_codebase_patterns", action_category="read_data")
@@ -99,14 +102,18 @@ class CodebaseCleanupService:
             worker_monitor.mark_failed(task.task_id, result.error_message or result.summary)
             return result, report
 
+        self._walk_errors = []
         for path in self._iter_source_files():
             report.scanned_files += 1
             if report.scanned_files == 1 or report.scanned_files % 25 == 0:
                 worker_monitor.append_output(task.task_id, f"Scanning file {report.scanned_files}: {path.relative_to(self.repo_root).as_posix()}")
             try:
                 lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-            except OSError:
-                worker_monitor.append_output(task.task_id, f"Skipped unreadable file: {path.relative_to(self.repo_root).as_posix()}")
+            except OSError as exc:
+                rel_path = path.relative_to(self.repo_root).as_posix()
+                reason = "permission denied" if is_permission_error(exc) else "unreadable"
+                report.skipped_paths.append({"path": rel_path, "reason": reason, "error": str(exc)})
+                worker_monitor.append_output(task.task_id, f"Skipped {reason} file: {rel_path}")
                 continue
             rel_path = path.relative_to(self.repo_root).as_posix()
             for line_number, line in enumerate(lines, start=1):
@@ -126,16 +133,27 @@ class CodebaseCleanupService:
 
         worker_monitor.append_output(task.task_id, f"Scanned {report.scanned_files} file(s).")
         worker_monitor.append_output(task.task_id, f"Found {len(report.matches)} match(es).")
+        report.skipped_paths.extend(self._walk_errors)
+        if report.skipped_paths:
+            worker_monitor.append_output(task.task_id, f"Skipped {len(report.skipped_paths)} blocked/unreadable path(s).")
         worker_monitor.mark_done(task.task_id)
+        blocked_count = sum(1 for item in report.skipped_paths if item.get("reason") == "permission denied")
+        summary = f"Codebase inspection found {len(report.matches)} match(es)."
+        if report.skipped_paths:
+            summary += f" Skipped {len(report.skipped_paths)} unreadable path(s)."
+        if blocked_count:
+            summary += f" {blocked_count} path(s) were blocked by permissions."
         return (
             SamResult(
                 status="success",
-                summary=f"Codebase inspection found {len(report.matches)} match(es).",
+                summary=summary,
                 next_action="stop",
                 metadata={
                     "scanned_files": report.scanned_files,
                     "match_count": len(report.matches),
                     "matches": [match.__dict__ for match in report.matches[:100]],
+                    "skipped_paths": report.skipped_paths[:50],
+                    "permission_blocked_count": blocked_count,
                     "worker_updates": [
                         f"{identity.name} scanned {report.scanned_files} file(s).",
                         f"{identity.name} found {len(report.matches)} match(es).",
@@ -172,11 +190,15 @@ class CodebaseCleanupService:
             worker_monitor.mark_failed(task.task_id, result.error_message or result.summary)
             return result, report
 
+        self._walk_errors = []
         for path in self._iter_source_files():
             report.scanned_files += 1
             try:
                 original = path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+            except OSError as exc:
+                rel_path = path.relative_to(self.repo_root).as_posix()
+                reason = "permission denied" if is_permission_error(exc) else "unreadable"
+                report.skipped_paths.append({"path": rel_path, "reason": reason, "error": str(exc)})
                 continue
             updated = original
             for old, new in clean_replacements.items():
@@ -187,8 +209,11 @@ class CodebaseCleanupService:
                 report.changed_files.append(rel_path)
                 worker_monitor.append_output(task.task_id, f"Updated {rel_path}")
 
+        report.skipped_paths.extend(self._walk_errors)
         worker_monitor.append_output(task.task_id, f"Scanned {report.scanned_files} file(s).")
         worker_monitor.append_output(task.task_id, f"Changed {len(report.changed_files)} file(s).")
+        if report.skipped_paths:
+            worker_monitor.append_output(task.task_id, f"Skipped {len(report.skipped_paths)} blocked/unreadable path(s).")
         worker_monitor.mark_done(task.task_id)
         return (
             SamResult(
@@ -198,6 +223,8 @@ class CodebaseCleanupService:
                 metadata={
                     "scanned_files": report.scanned_files,
                     "changed_files": report.changed_files,
+                    "skipped_paths": report.skipped_paths[:50],
+                    "permission_blocked_count": sum(1 for item in report.skipped_paths if item.get("reason") == "permission denied"),
                     "worker_updates": [
                         f"{identity.name} scanned {report.scanned_files} file(s).",
                         f"{identity.name} changed {len(report.changed_files)} file(s).",
@@ -208,7 +235,16 @@ class CodebaseCleanupService:
         )
 
     def _iter_source_files(self):
-        for current_root, dir_names, file_names in os.walk(self.repo_root):
+        def onerror(exc: OSError) -> None:
+            filename = str(getattr(exc, "filename", "") or "")
+            try:
+                rel = Path(filename).relative_to(self.repo_root).as_posix() if filename else filename
+            except ValueError:
+                rel = filename
+            reason = "permission denied" if is_permission_error(exc) else "unreadable"
+            self._walk_errors.append({"path": rel, "reason": reason, "error": str(exc)})
+
+        for current_root, dir_names, file_names in os.walk(self.repo_root, onerror=onerror):
             current = Path(current_root)
             try:
                 rel_root = current.relative_to(self.repo_root).as_posix()

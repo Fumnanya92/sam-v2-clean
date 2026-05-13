@@ -16,6 +16,13 @@ from typing import Any, Callable
 
 from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
+from core.autonomy_policy import (
+    AutonomousDecisionPolicy,
+    evidence_path_score,
+    ranked_evidence_matches,
+    strongest_evidence_match,
+    synthesize_evidence_answer,
+)
 from core.operational_tools import (
     OperationalToolContext,
     build_default_operational_registry,
@@ -56,6 +63,7 @@ class AutonomousRuntime:
         self.project_inspector = project_inspector
         self.workspace_cleanup = workspace_cleanup
         self.services = services
+        self.fallback_policy = AutonomousDecisionPolicy()
         self.tool_registry = build_default_operational_registry(
             OperationalToolContext(
                 awareness=self.awareness,
@@ -72,59 +80,47 @@ class AutonomousRuntime:
         )
 
     def run(self, request: Any, memory_block: dict[str, Any] | None) -> SamResult:
-        if not self.model_client.is_available():
-            return SamResult(
-                status="failed",
-                summary="My local reasoning model is unavailable, so I cannot run an autonomous investigation.",
-                error_type=ErrorType.MISSING_CAPABILITY,
-                error_message="llm unavailable",
-                next_action="ask_user",
-                metadata={"intent": getattr(request, "intent", "autonomous_request"), "source": getattr(request, "source", "")},
-            )
-
         tools = self.tool_manifest()
         observations: list[dict[str, Any]] = []
         tool_trace: list[dict[str, Any]] = []
 
         for step_index in range(5):
-            try:
-                decision = self.model_client.choose_autonomous_action(
-                    user_text=getattr(request, "raw_text", ""),
-                    tools=tools,
-                    observations=observations,
-                    memory_block=memory_block,
-                    workspace_root=str(self.workspace_root),
-                )
-            except Exception as exc:
-                if observations:
-                    return self._final_from_observations(request, observations, tool_trace, str(exc))
-                fallback = self._fallback_read(request, memory_block, str(exc))
-                if fallback is not None:
-                    return fallback
-                return SamResult(
-                    status="failed",
-                    summary="Autonomous reasoning failed before I could choose a safe tool.",
-                    error_type=ErrorType.TOOL_FAILED,
-                    error_message=str(exc),
-                    next_action="retry",
-                    metadata={"intent": getattr(request, "intent", "autonomous_request"), "source": getattr(request, "source", "")},
-                )
+            decision = self._choose_next_action(
+                request=request,
+                tools=tools,
+                observations=observations,
+                memory_block=memory_block,
+            )
 
             action = str(decision.get("action", "")).lower()
             if action == "final":
+                guarded_final = self._guard_final_decision(decision, tools, observations, memory_block, request)
+                if guarded_final is not None:
+                    decision = guarded_final
+                    action = str(decision.get("action", "")).lower()
+            if action == "final":
+                failed_final = self._guard_failed_final_decision(decision, observations, tool_trace)
+                if failed_final is not None:
+                    return failed_final
                 answer = str(decision.get("answer", "")).strip() or self._observations_summary(observations)
-                return SamResult(
-                    status="success",
-                    summary=answer,
-                    next_action="stop",
-                    metadata={
+                if _thin_final_answer(answer) and observations:
+                    answer = synthesize_evidence_answer(getattr(request, "raw_text", ""), observations)
+                metadata = self._evidence_metadata(observations)
+                metadata.update(
+                    {
                         "intent": "autonomous_request",
-                        "source": getattr(request, "source", ""),
+                        "source": str(decision.get("source") or getattr(request, "source", "")),
                         "confidence": getattr(request, "confidence", "low"),
                         "autonomous_steps": len(tool_trace),
                         "tool_trace": tool_trace,
                         "observations": observations,
-                    },
+                    }
+                )
+                return SamResult(
+                    status="success",
+                    summary=answer,
+                    next_action="stop",
+                    metadata=metadata,
                 )
 
             if action == "ask_user":
@@ -150,6 +146,18 @@ class AutonomousRuntime:
             arguments = decision.get("arguments", {})
             if not isinstance(arguments, dict):
                 arguments = {}
+            guard_result = self._guard_tool_decision(tool_name, arguments, observations)
+            if guard_result is not None:
+                if guard_result.get("action") == "final":
+                    return self._final_from_observations(
+                        request,
+                        observations,
+                        tool_trace,
+                        str(guard_result.get("reason", "")),
+                    )
+                tool_name = str(guard_result.get("tool", tool_name))
+                replacement_arguments = guard_result.get("arguments", arguments)
+                arguments = replacement_arguments if isinstance(replacement_arguments, dict) else arguments
 
             worker_identity = self._worker_identity(tool_name)
             task = worker_monitor.create_task(
@@ -191,20 +199,49 @@ class AutonomousRuntime:
             )
 
             if tool_result.next_action == "ask_user" and not tool_result.ok:
-                return SamResult(
-                    status="success",
-                    summary=tool_result.summary,
-                    next_action="ask_user",
-                    metadata={
-                        "intent": "clarify",
-                        "source": "autonomous_loop",
-                        "autonomous_steps": len(tool_trace),
-                        "tool_trace": tool_trace,
-                        "observations": observations,
-                    },
-                )
+                continue
 
         return self._final_from_observations(request, observations, tool_trace, "")
+
+    def _choose_next_action(
+        self,
+        *,
+        request: Any,
+        tools: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        memory_block: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if self.model_client.is_available():
+            try:
+                return self.model_client.choose_autonomous_action(
+                    user_text=getattr(request, "raw_text", ""),
+                    tools=tools,
+                    observations=observations,
+                    memory_block=memory_block,
+                    workspace_root=str(self.workspace_root),
+                )
+            except Exception as exc:
+                decision = self.fallback_policy.decide(
+                    user_text=getattr(request, "raw_text", ""),
+                    tools=tools,
+                    observations=observations,
+                    memory_block=memory_block,
+                    workspace_root=str(self.workspace_root),
+                )
+                decision.setdefault("source", "autonomous_fallback")
+                decision.setdefault("fallback_reason", str(exc))
+                return decision
+
+        decision = self.fallback_policy.decide(
+            user_text=getattr(request, "raw_text", ""),
+            tools=tools,
+            observations=observations,
+            memory_block=memory_block,
+            workspace_root=str(self.workspace_root),
+        )
+        decision.setdefault("source", "autonomous_fallback")
+        decision.setdefault("fallback_reason", "model unavailable")
+        return decision
 
     def execute_tool(
         self,
@@ -218,6 +255,152 @@ class AutonomousRuntime:
 
     def tool_manifest(self) -> list[dict[str, Any]]:
         return self.tool_registry.manifest()
+
+    def _guard_tool_decision(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        observations: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if tool_name not in {"read_file", "read_file_region"}:
+            return None
+        prior_scan = self._latest_scan_observation(observations)
+        if not prior_scan:
+            return None
+        metadata = prior_scan.get("metadata", {})
+        if not isinstance(metadata, dict):
+            return None
+        matches = metadata.get("matches", [])
+        patterns = metadata.get("patterns", [])
+        if not isinstance(matches, list) or not isinstance(patterns, list):
+            return None
+        requested_path = str(arguments.get("path", "")).strip()
+        pattern_text = [str(item) for item in patterns]
+        strongest = strongest_evidence_match(matches, pattern_text, excluded_paths=self._read_paths(observations))
+        strongest_path = str(strongest.get("path", "")).strip()
+        requested_score = evidence_path_score(requested_path, matches, pattern_text) if requested_path else 0
+        strongest_score = evidence_path_score(strongest_path, matches, pattern_text) if strongest_path else 0
+        if requested_path and requested_score >= strongest_score and requested_score > 0:
+            return None
+        replacement_path = str(strongest.get("path", "")).strip()
+        if not replacement_path:
+            return {
+                "action": "final",
+                "reason": "no scan result was strong enough to justify reading a file",
+            }
+        root = str(metadata.get("root_path", "")).strip()
+        candidate = Path(replacement_path)
+        resolved = str(candidate if candidate.is_absolute() or not root else Path(root) / replacement_path)
+        replacement_tool = "read_file_region" if tool_name == "read_file_region" else "read_file"
+        replacement_arguments = {**arguments, "path": resolved}
+        if replacement_tool == "read_file_region":
+            replacement_arguments["line"] = int(strongest.get("line_number", 1) or 1)
+            replacement_arguments.setdefault("context_before", 18)
+            replacement_arguments.setdefault("context_after", 70)
+        return {"action": "tool", "tool": replacement_tool, "arguments": replacement_arguments}
+
+    def _guard_final_decision(
+        self,
+        decision: dict[str, Any],
+        tools: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        memory_block: dict[str, Any] | None,
+        request: Any,
+    ) -> dict[str, Any] | None:
+        prior_scan = self._latest_scan_observation(observations)
+        if not prior_scan:
+            return None
+        read_paths = self._read_paths(observations)
+        if len(read_paths) >= 2:
+            return None
+        available = {str(item.get("name", "")) for item in tools if isinstance(item, dict)}
+        if "read_file_region" not in available and "read_file" not in available:
+            return None
+        metadata = prior_scan.get("metadata", {})
+        if not isinstance(metadata, dict):
+            return None
+        matches = metadata.get("matches", [])
+        patterns = metadata.get("patterns", [])
+        if not isinstance(matches, list) or not isinstance(patterns, list) or not matches:
+            return None
+        ranked = ranked_evidence_matches(matches, [str(item) for item in patterns], excluded_paths=read_paths)
+        if not ranked:
+            return None
+        strongest = ranked[0]
+        file_path = str(strongest.get("path", "")).strip()
+        root = str(metadata.get("root_path", "")).strip()
+        if not file_path:
+            return None
+        candidate = Path(file_path)
+        resolved = str(candidate if candidate.is_absolute() or not root else Path(root) / file_path)
+        tool_name = "read_file_region" if "read_file_region" in available else "read_file"
+        if tool_name == "read_file_region":
+            arguments = {
+                "path": resolved,
+                "line": int(strongest.get("line_number", 1) or 1),
+                "context_before": 18,
+                "context_after": 70,
+            }
+        else:
+            arguments = {"path": resolved, "max_chars": 12000}
+        decision["deferred_answer"] = str(decision.get("answer", ""))
+        return {"action": "tool", "tool": tool_name, "arguments": arguments, "source": "evidence_guard"}
+
+    def _guard_failed_final_decision(
+        self,
+        decision: dict[str, Any],
+        observations: list[dict[str, Any]],
+        tool_trace: list[dict[str, Any]],
+    ) -> SamResult | None:
+        if not observations:
+            return None
+        last = observations[-1]
+        if str(last.get("status", "")).lower() in {"success", "ok"}:
+            return None
+        answer = str(decision.get("answer", "")).strip()
+        failure_text = f"{last.get('summary', '')} {last.get('error', '')}".strip()
+        if answer and failure_text and answer.lower() not in failure_text.lower() and failure_text.lower() not in answer.lower():
+            return None
+        metadata = self._evidence_metadata(observations)
+        metadata.update(
+            {
+                "intent": "clarify",
+                "source": str(decision.get("source") or "autonomous_loop"),
+                "autonomous_steps": len(tool_trace),
+                "tool_trace": tool_trace,
+                "observations": observations,
+            }
+        )
+        return SamResult(
+            status="success",
+            summary=(
+                "I could not resolve the project or directory from the current context. "
+                "I tried the tool, captured the failure, and need a valid project path or registered project name to continue."
+            ),
+            error_type=ErrorType.FILE_ACCESS_ERROR,
+            error_message=str(last.get("error") or last.get("summary") or ""),
+            next_action="ask_user",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _latest_scan_observation(observations: list[dict[str, Any]]) -> dict[str, Any]:
+        for observation in reversed(observations):
+            if str(observation.get("tool", "")) == "scan_codebase_patterns":
+                return observation
+        return {}
+
+    @staticmethod
+    def _read_paths(observations: list[dict[str, Any]]) -> set[str]:
+        paths: set[str] = set()
+        for observation in observations:
+            if str(observation.get("tool", "")) not in {"read_file", "read_file_region"}:
+                continue
+            metadata = observation.get("metadata", {})
+            path = str(metadata.get("path", "")).strip() if isinstance(metadata, dict) else ""
+            if path:
+                paths.add(path.replace("\\", "/").lower())
+        return paths
 
     def _fallback_read(self, request: Any, memory_block: dict[str, Any] | None, reason: str) -> SamResult | None:
         roots = self._memory_roots(memory_block)
@@ -301,12 +484,21 @@ class AutonomousRuntime:
             "patterns",
             "match_count",
             "matches",
+            "skipped_paths",
+            "permission_blocked_count",
             "errors",
             "files_scanned",
             "tasks",
             "tools",
             "projects",
             "content",
+            "line",
+            "start_line",
+            "end_line",
+            "line_count",
+            "requested_query",
+            "recovered_from_query",
+            "resolution_attempts",
         ):
             if key in result.metadata:
                 value = result.metadata[key]
@@ -348,8 +540,33 @@ class AutonomousRuntime:
                 "autonomous_steps": len(tool_trace),
                 "tool_trace": tool_trace,
                 "observations": observations,
+                **self._evidence_metadata(observations),
             },
         )
+
+    @staticmethod
+    def _evidence_metadata(observations: list[dict[str, Any]]) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        for observation in observations:
+            raw = observation.get("metadata", {})
+            if not isinstance(raw, dict):
+                continue
+            for key in (
+                "root_path",
+                "repo_root",
+                "path",
+                "patterns",
+                "match_count",
+                "matches",
+                "skipped_paths",
+                "permission_blocked_count",
+                "requested_query",
+                "recovered_from_query",
+                "resolution_attempts",
+            ):
+                if key in raw and key not in metadata:
+                    metadata[key] = raw[key]
+        return metadata
 
     @staticmethod
     def _observations_summary(observations: list[dict[str, Any]]) -> str:
@@ -364,38 +581,85 @@ def _autonomous_search_terms(text: str) -> list[str]:
     words = re.findall(r"[A-Za-z0-9_.-]+", text_without_paths.lower())
     ignored = {
         "a",
+        "about",
+        "after",
+        "again",
+        "all",
         "an",
         "app",
         "are",
+        "because",
+        "before",
         "can",
         "check",
         "could",
+        "did",
+        "do",
+        "does",
         "for",
+        "from",
         "gave",
+        "have",
+        "he",
+        "her",
         "here",
+        "him",
+        "his",
+        "i",
         "in",
         "is",
         "it",
+        "let",
+        "look",
         "me",
+        "most",
         "need",
+        "now",
+        "of",
+        "on",
+        "or",
+        "our",
+        "people",
         "please",
         "project",
+        "saw",
+        "she",
+        "show",
+        "something",
+        "tell",
+        "that",
         "the",
         "their",
+        "them",
+        "then",
+        "there",
+        "they",
+        "things",
         "this",
         "to",
+        "was",
+        "we",
+        "were",
+        "what",
         "when",
+        "where",
+        "who",
+        "why",
         "you",
+        "your",
     }
-    terms = [word for word in words if len(word) > 2 and word not in ignored and not _looks_like_path_fragment(word)]
+    terms = []
+    for word in words:
+        term = word.strip("._-")
+        if len(term) > 2 and term not in ignored and not term.isdigit() and not _looks_like_path_fragment(term):
+            terms.append(term)
     expanded: list[str] = []
-    if any(term in {"levy", "levies"} for term in terms):
-        expanded.extend(["levies", "levy"])
-    if any(term in {"resident", "residents"} for term in terms):
-        expanded.extend(["residents", "resident"])
-    if "due" in terms or "due" in words:
-        expanded.extend(["due_date", "dueDate", "due"])
-    expanded.extend(term for term in terms if term not in expanded)
+    for term in terms:
+        expanded.append(term)
+        if term.endswith("ies") and len(term) > 4:
+            expanded.append(term[:-3] + "y")
+        elif term.endswith("s") and len(term) > 4:
+            expanded.append(term[:-1])
     return list(dict.fromkeys(expanded))[:8]
 
 
@@ -420,11 +684,8 @@ def _plain_english_scan_summary(
         file_counts[match.path] = file_counts.get(match.path, 0) + 1
     files = list(file_counts)[:5]
     file_text = ", ".join(files)
-    month_hint = _month_hint(request_text)
-    due_hint = "due date" if any("due" in pattern.lower() for pattern in patterns) else "requested value"
     return (
-        f"I searched {scanned_files} project file(s) in {root} for the {due_hint}"
-        f"{f' around {month_hint}' if month_hint else ''}. "
+        f"I searched {scanned_files} project file(s) in {root} for the requested evidence. "
         f"I found relevant references, but I cannot honestly confirm the final answer from a text scan alone yet. "
         f"The strongest places to inspect next are: {file_text}. "
         f"I filtered out dependency/build folders and kept the raw evidence in the activity stream."
@@ -432,19 +693,25 @@ def _plain_english_scan_summary(
 
 
 def _rank_relevant_matches(matches: list[Any], patterns: list[str]) -> list[Any]:
-    important = ("levy", "levies", "due_date", "duedate", "due", "resident", "residents")
+    requested = {
+        token
+        for pattern in patterns
+        for token in re.findall(r"[A-Za-z0-9_]+", str(pattern).lower())
+        if len(token) > 2
+    }
 
     def score(match: Any) -> tuple[int, int, str]:
         path = str(getattr(match, "path", "")).lower()
         pattern = str(getattr(match, "pattern", "")).lower()
         line = str(getattr(match, "line", "")).lower()
         value = 0
-        if any(token in pattern for token in important):
-            value += 4
-        if any(token in path for token in ("levy", "levies", "resident", "firebase", "firestore")):
-            value += 3
-        if any(token in line for token in ("due_date", "duedate", "due date", "resident_levies")):
-            value += 3
+        for token in requested:
+            if token in pattern:
+                value += 3
+            if token in path:
+                value += 2
+            if token in line:
+                value += 1
         if any(path.endswith(ext) for ext in (".md", ".txt")):
             value -= 1
         return (-value, int(getattr(match, "line_number", 0)), path)
@@ -468,42 +735,14 @@ def _looks_like_path_fragment(word: str) -> bool:
     return lowered in {"c", "users", "desktop", "darey", "dell.com"} or "\\" in word or "/" in word
 
 
-def _month_hint(text: str) -> str:
-    months = {
-        "jan": "January",
-        "january": "January",
-        "feb": "February",
-        "february": "February",
-        "mar": "March",
-        "march": "March",
-        "apr": "April",
-        "april": "April",
-        "may": "May",
-        "jun": "June",
-        "june": "June",
-        "jul": "July",
-        "july": "July",
-        "aug": "August",
-        "august": "August",
-        "sep": "September",
-        "sept": "September",
-        "september": "September",
-        "oct": "October",
-        "october": "October",
-        "nov": "November",
-        "november": "November",
-        "dec": "December",
-        "december": "December",
-    }
-    words = re.findall(r"[A-Za-z]+", text.lower())
-    for word in words:
-        if word in months:
-            return months[word]
-    return ""
-
-
 def _normalize_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     return {str(key): _normalize_value(value) for key, value in arguments.items()}
+
+
+def _thin_final_answer(answer: str) -> bool:
+    words = re.findall(r"[A-Za-z0-9_]+", answer)
+    lowered = answer.strip().lower()
+    return len(words) < 5 or lowered in {"done", "ok", "complete", "completed", "finished"}
 
 
 def _normalize_value(value: Any) -> Any:

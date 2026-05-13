@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from typing import Any, Callable
 
 from diagnostics.result import SamResult
@@ -45,6 +46,7 @@ class WorkflowRuntime:
             )
         )
         recent_history = self._recent_history(memory_block)
+        parsed_hint = self._promote_operational_goal(user_text, parsed_hint, state)
 
         policy_decision = self.policy.decide_pre_action(
             user_text=user_text,
@@ -112,6 +114,52 @@ class WorkflowRuntime:
         )
         result = append_trace(result, *events)
         return result
+
+    @staticmethod
+    def _promote_operational_goal(user_text: str, hint: IntentRequest, state: GoalState) -> IntentRequest:
+        """Route actionable goals into the operational runtime when parsing is weak."""
+        if hint.intent not in {"chat", "clarify"}:
+            return hint
+        if hint.source not in {"llm_unavailable", "fallback_rule"}:
+            return hint
+
+        text = user_text.strip().lower()
+        has_path = bool(re.search(r"[a-z]:[\\/]", user_text, flags=re.IGNORECASE))
+        operational_words = {
+            "check",
+            "find",
+            "inspect",
+            "look",
+            "scan",
+            "search",
+            "verify",
+            "debug",
+            "read",
+            "open",
+            "trace",
+        }
+        target_words = {"app", "project", "repo", "file", "folder", "code", "document", "docs", "logs"}
+        is_operational = (
+            has_path
+            or (
+                any(word in text.split() for word in operational_words)
+                and any(word in text for word in target_words)
+            )
+        )
+        if not is_operational:
+            return hint
+
+        parameters = dict(hint.parameters) if isinstance(hint.parameters, dict) else {}
+        parameters.setdefault("objective", user_text.strip())
+        return replace(
+            hint,
+            intent="autonomous_request",
+            parameters=parameters,
+            needs_clarification=False,
+            clarification_question="",
+            response_text="",
+            source="workflow_runtime",
+        )
 
     def _decide_request(
         self,
@@ -230,6 +278,57 @@ class WorkflowRuntime:
                     "message": message,
                 }
             )
+        tool_trace = result.metadata.get("tool_trace", [])
+        if isinstance(tool_trace, list):
+            for step in tool_trace[:8]:
+                if not isinstance(step, dict):
+                    continue
+                worker = str(step.get("worker_name", "") or "Worker")
+                tool = str(step.get("tool", "") or "tool")
+                status = str(step.get("status", "") or "")
+                summary = str(step.get("summary", "") or "")
+                runtime_events.append(
+                    {
+                        "type": "runtime.tool_step",
+                        "label": "Autonomous tool step",
+                        "status": status,
+                        "tool": tool,
+                        "action": tool,
+                        "observation": summary,
+                        "message": f"[{worker}] {tool} -> {status}: {summary}",
+                    }
+                )
+        observations = result.metadata.get("observations", [])
+        if isinstance(observations, list):
+            for observation in observations[:8]:
+                if not isinstance(observation, dict):
+                    continue
+                metadata = observation.get("metadata", {})
+                error = str(observation.get("error", "") or "")
+                details: list[str] = []
+                if isinstance(metadata, dict):
+                    root_path = str(metadata.get("root_path", "") or metadata.get("path", ""))
+                    if root_path:
+                        details.append(f"path={root_path}")
+                    match_count = metadata.get("match_count")
+                    if match_count is not None:
+                        details.append(f"matches={match_count}")
+                    blocked = metadata.get("permission_blocked_count")
+                    if blocked:
+                        details.append(f"permission_blocked={blocked}")
+                if error:
+                    details.append(f"error={error}")
+                if details:
+                    runtime_events.append(
+                        {
+                            "type": "runtime.observation",
+                            "label": "Observation detail",
+                            "status": str(observation.get("status", "")),
+                            "tool": str(observation.get("tool", "")),
+                            "observation": "; ".join(details),
+                            "message": f"[Echo] Observation detail: {'; '.join(details)}",
+                        }
+                    )
         runtime_events.append(
             {
                 "type": "runtime.result",

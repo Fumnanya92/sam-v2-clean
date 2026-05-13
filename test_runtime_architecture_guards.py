@@ -22,6 +22,25 @@ class _Model:
         )
 
 
+class _UnavailableModel:
+    def is_available(self) -> bool:
+        return False
+
+
+class _AutonomousModel(_Model):
+    def __init__(self, mapping: dict[str, OllamaIntentOutput], actions: list[dict[str, Any]]) -> None:
+        super().__init__(mapping)
+        self.actions = actions
+        self.action_index = 0
+
+    def choose_autonomous_action(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if self.action_index >= len(self.actions):
+            return {"action": "final", "answer": "done"}
+        action = self.actions[self.action_index]
+        self.action_index += 1
+        return action
+
+
 def test_primary_execution_path_uses_runtime_engine_for_registered_tool() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
@@ -82,6 +101,47 @@ def test_runtime_events_stream_is_present() -> None:
         assert any(str(message).startswith("[Echo]") for message in messages)
 
 
+def test_runtime_events_include_autonomous_tool_observations() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        runtime = SamRuntime(
+            db_path=root / "sam.db",
+            memory_path=root / "memory.json",
+            session_path=root / "session.json",
+            workspace_root=root / "workspace",
+        )
+        model = _AutonomousModel(
+            {
+                "check renewal in the project": OllamaIntentOutput(
+                    intent="autonomous_request",
+                    parameters={},
+                    confidence="high",
+                    source="test",
+                )
+            },
+            actions=[
+                {
+                    "action": "tool",
+                    "tool": "scan_codebase_patterns",
+                    "arguments": {"query": str(root / "missing_project"), "patterns": ["renewal"]},
+                },
+                {"action": "final", "answer": "Project or directory could not be resolved."},
+            ],
+        )
+        runtime.handler.router.model_client = model
+        runtime.handler.request_parser.model_client = model
+        runtime.handler.request_parser.autonomous_runtime.model_client = model
+
+        result = runtime.handle_text("check renewal in the project")
+
+        events = result.metadata.get("runtime_events", [])
+        messages = [item.get("message", "") for item in events if isinstance(item, dict)]
+        assert result.next_action == "ask_user"
+        assert any("scan_codebase_patterns -> failed" in str(message) for message in messages)
+        assert any("error=" in str(message) for message in messages)
+        assert any("1 step(s)" in str(step.get("observation", "")) for step in result.metadata["execution_trace"])
+
+
 def test_chat_like_requests_use_legacy_compatibility_path() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
@@ -97,6 +157,29 @@ def test_chat_like_requests_use_legacy_compatibility_path() -> None:
         result = runtime.handle_text("hello")
         assert result.ok
         assert result.metadata.get("execution_path") == "legacy_router_compat"
+
+
+def test_model_unavailable_operational_goal_enters_autonomous_loop() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        project = root / "TargetProject"
+        project.mkdir()
+        (project / "billing_rules.txt").write_text("The renewal fee grace window ends on day 14.\n", encoding="utf-8")
+        runtime = SamRuntime(
+            db_path=root / "sam.db",
+            memory_path=root / "memory.json",
+            session_path=root / "session.json",
+            workspace_root=root / "workspace",
+        )
+        runtime.handler.request_parser.model_client = _UnavailableModel()
+        runtime.handler.request_parser.autonomous_runtime.model_client = _UnavailableModel()
+
+        result = runtime.handle_text(f"check when the renewal fee grace window ends in this project {project}")
+
+        assert result.ok
+        assert result.metadata.get("intent") == "autonomous_request"
+        assert result.metadata.get("autonomous_steps", 0) >= 1
+        assert "day 14" in result.summary or "renewal" in result.summary.lower()
 
 
 def test_router_does_not_own_autonomous_runtime_loop() -> None:
@@ -121,6 +204,15 @@ def test_autonomous_runtime_uses_operational_tool_registry() -> None:
     registry_source = Path("core/operational_tools.py").read_text(encoding="utf-8")
     assert "class OperationalToolRegistry" in registry_source
     assert "build_default_operational_registry" in registry_source
+
+
+def test_autonomous_runtime_has_model_unavailable_policy_fallback() -> None:
+    runtime_source = Path("core/autonomous_runtime.py").read_text(encoding="utf-8")
+    policy_source = Path("core/autonomy_policy.py").read_text(encoding="utf-8")
+
+    assert "AutonomousDecisionPolicy" in runtime_source
+    assert "My local reasoning model is unavailable" not in runtime_source
+    assert "class AutonomousDecisionPolicy" in policy_source
 
 
 def test_intents_package_does_not_own_runtime_tool_registry() -> None:

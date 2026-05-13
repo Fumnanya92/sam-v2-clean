@@ -77,7 +77,9 @@ class RuntimeExecutionEngine:
         )
         result, step_executions = self.observation_loop.execute_plan(plan, memory_block)
         result.metadata.setdefault("execution_path", "runtime_engine")
-        result.metadata.setdefault("execution_steps", len(step_executions))
+        autonomous_steps = int(result.metadata.get("autonomous_steps", 0) or 0)
+        visible_steps = len(step_executions) + autonomous_steps
+        result.metadata.setdefault("execution_steps", visible_steps)
         result.metadata.setdefault("plan_mode", plan.mode)
         result.metadata.setdefault("plan_action", plan.plan_action.value)
         result.metadata.setdefault("request_intent", request.intent)
@@ -85,5 +87,5 @@ class RuntimeExecutionEngine:
         return append_trace(
             result,
             trace_step("Execution path", action="runtime_engine", tool=plan.tool_name),
-            trace_step("Observation loop", observation=f"{len(step_executions)} step(s)"),
+            trace_step("Observation loop", observation=f"{visible_steps} step(s)"),
         )

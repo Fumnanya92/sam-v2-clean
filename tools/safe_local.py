@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from diagnostics.error_types import ErrorType
+from diagnostics.permission_errors import file_error_type, permission_metadata
 from diagnostics.result import SamResult
 from storage.db import log_audit_event
 from storage.models import AuditEvent
@@ -172,10 +173,10 @@ class SafeLocalTools:
                 SamResult(
                     status="failed",
                     summary="Failed to read file.",
-                    error_type=ErrorType.FILE_ACCESS_ERROR,
+                    error_type=file_error_type(exc),
                     error_message=str(exc),
                     next_action="retry",
-                    metadata={"path": str(target)},
+                    metadata=permission_metadata(str(target), exc),
                 ),
                 None,
             )
@@ -288,10 +289,10 @@ class SafeLocalTools:
                 SamResult(
                     status="failed",
                     summary="Failed to list directory.",
-                    error_type=ErrorType.FILE_ACCESS_ERROR,
+                    error_type=file_error_type(exc),
                     error_message=str(exc),
                     next_action="retry",
-                    metadata={"path": str(target)},
+                    metadata=permission_metadata(str(target), exc),
                 ),
                 [],
             )
@@ -332,10 +333,10 @@ class SafeLocalTools:
             return SamResult(
                 status="failed",
                 summary="Failed to open directory.",
-                error_type=ErrorType.FILE_ACCESS_ERROR,
+                error_type=file_error_type(exc),
                 error_message=str(exc),
                 next_action="retry",
-                metadata={"path": str(target)},
+                metadata=permission_metadata(str(target), exc),
             )
 
     def open_directory_query(self, query: str | Path) -> SamResult:
@@ -382,10 +383,10 @@ class SafeLocalTools:
             return SamResult(
                 status="failed",
                 summary="Failed to open file.",
-                error_type=ErrorType.FILE_ACCESS_ERROR,
+                error_type=file_error_type(exc),
                 error_message=str(exc),
                 next_action="retry",
-                metadata={"path": str(target)},
+                metadata=permission_metadata(str(target), exc),
             )
 
     def open_file_query(

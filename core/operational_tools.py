@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from diagnostics.error_types import ErrorType
+from diagnostics.permission_errors import file_error_type, permission_metadata
 from diagnostics.result import SamResult
 from projects import inspection_metadata
 from tools import CodebaseCleanupService
@@ -95,6 +96,12 @@ def build_default_operational_registry(context: OperationalToolContext) -> Opera
     register("capabilities", "List available Sam capabilities.", {}, _capabilities(context))
     register("list_projects", "List registered projects.", {}, _list_projects(context))
     register("read_file", "Read a UTF-8 text file.", {"path": "file path or name", "max_chars": 6000}, _read_file(context))
+    register(
+        "read_file_region",
+        "Read a focused line range from a UTF-8 text file.",
+        {"path": "file path or name", "line": 1, "context_before": 20, "context_after": 60},
+        _read_file_region(context),
+    )
     register("list_directory", "List files in a directory.", {"path": "directory path or project path"}, _list_directory(context))
     register("inspect_repo", "Inspect repo branch, working tree, and top-level files.", {"query": "project name or path"}, _inspect_repo(context))
     register("inspect_git_state", "Inspect git branch and changed files.", {"query": "project name or path"}, _inspect_git_state(context))
@@ -198,6 +205,74 @@ def _read_file(context: OperationalToolContext) -> Handler:
     return handler
 
 
+def _read_file_region(context: OperationalToolContext) -> Handler:
+    def handler(arguments: dict[str, Any], request: Any, memory_block: dict[str, Any] | None) -> SamResult:
+        path = str(arguments.get("path", "")).strip()
+        if not path:
+            return SamResult(
+                status="failed",
+                summary="File path is required.",
+                error_type=ErrorType.TOOL_FAILED,
+                error_message="missing path",
+                next_action="ask_user",
+                metadata={"intent": "read_file_region"},
+            )
+        additional_roots = context.memory_roots(memory_block)
+        resolve_result, resolved = context.project_inspector.tools.resolve_file_query(path, additional_roots=additional_roots)
+        if not resolve_result.ok or resolved is None:
+            return context.service_result("read_file_region", resolve_result, metadata={"path": path})
+
+        try:
+            requested_line = max(1, int(arguments.get("line", 1) or 1))
+            before = max(0, min(200, int(arguments.get("context_before", 20) or 20)))
+            after = max(1, min(300, int(arguments.get("context_after", 60) or 60)))
+        except (TypeError, ValueError):
+            requested_line = 1
+            before = 20
+            after = 60
+
+        try:
+            lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            return SamResult(
+                status="failed",
+                summary=f"Could not read {resolved}.",
+                error_type=file_error_type(exc),
+                error_message=str(exc),
+                next_action="ask_user",
+                metadata={"intent": "read_file_region", **permission_metadata(str(resolved), exc)},
+            )
+
+        if not lines:
+            content = ""
+            start_line = 1
+            end_line = 1
+        else:
+            index = min(requested_line, len(lines)) - 1
+            start = max(0, index - before)
+            end = min(len(lines), index + after + 1)
+            start_line = start + 1
+            end_line = end
+            content = "\n".join(f"{line_number}: {line}" for line_number, line in enumerate(lines[start:end], start_line))
+
+        return SamResult(
+            status="success",
+            summary=f"Read {resolved}:{start_line}-{end_line}.",
+            next_action="stop",
+            metadata={
+                "intent": "read_file_region",
+                "path": str(resolved),
+                "line": requested_line,
+                "start_line": start_line,
+                "end_line": end_line,
+                "line_count": len(lines),
+                "content": content,
+            },
+        )
+
+    return handler
+
+
 def _list_directory(context: OperationalToolContext) -> Handler:
     def handler(arguments: dict[str, Any], request: Any, memory_block: dict[str, Any] | None) -> SamResult:
         path = str(arguments.get("path", "") or arguments.get("query", "")).strip()
@@ -284,9 +359,12 @@ def _scan_codebase_patterns(context: OperationalToolContext) -> Handler:
             {
                 "intent": "scan_codebase_patterns",
                 "root_path": str(root),
+                "requested_query": query,
                 "patterns": patterns,
                 "matches": [match.__dict__ for match in report.matches[:100]],
                 "match_count": len(report.matches),
+                "skipped_paths": report.skipped_paths[:50],
+                "permission_blocked_count": sum(1 for item in report.skipped_paths if item.get("reason") == "permission denied"),
             }
         )
         return scan_result
