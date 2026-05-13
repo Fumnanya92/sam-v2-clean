@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from diagnostics.result import SamResult
-from intents import IntentRequest
 
 from .goal_state import GoalState
+from .request_model import IntentRequest
 
 
 @dataclass(frozen=True)

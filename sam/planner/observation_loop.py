@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any
 
 from diagnostics.result import SamResult
 from diagnostics.error_types import ErrorType
@@ -83,7 +83,6 @@ class ObservationLoop:
         Returns:
             Tuple of (final result, list of step executions)
         """
-        executions: list[StepExecution] = []
         policy_result = self._result_for_plan_action(plan)
         if policy_result is not None:
             return policy_result

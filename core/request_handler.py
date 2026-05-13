@@ -12,8 +12,8 @@ from diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
 from diagnostics.result import SamResult
 from diagnostics.trace import ensure_trace
 from diagnostics.run_logger import RunLogger
+from core.conversation_state import ConversationState
 from intents import IntentRouter
-from intents.conversation_state import ConversationState
 from memory.manager import load_memory, update_memory
 from memory.session import save_session_state
 from storage.db import log_audit_event
@@ -48,7 +48,19 @@ class RequestHandler:
             authority_engine=authority_engine,
             approval_manager=self.approval_manager,
         )
-        self.execution_engine = RuntimeExecutionEngine(self.router)
+        self.request_parser = self.router
+        self.legacy_executor = self.router
+        self.conversation_state = self.router.conversation_state
+        self.registry = self.router.registry
+        self.tool_executor = self.router.tool_executor
+        self.task_planner = self.router.task_planner
+        self.observation_loop = self.router.observation_loop
+        self.authority_gate = self.router.authority_gate
+        self.execution_engine = RuntimeExecutionEngine(
+            tool_executor=self.tool_executor,
+            task_planner=self.task_planner,
+            observation_loop=self.observation_loop,
+        )
         self.workflow_runtime = WorkflowRuntime()
 
     def handle(self, user_text: str, session: RuntimeSession) -> SamResult:
@@ -111,7 +123,7 @@ class RequestHandler:
             summary_logger.write(result, metadata={"session_id": session.session_id})
             return result
 
-        parsed_hint = self.router.parse(text, _memory)
+        parsed_hint = self.request_parser.parse(text, _memory)
         result = ensure_trace(
             self.workflow_runtime.run_turn(
                 user_text=text,
@@ -121,7 +133,7 @@ class RequestHandler:
                 execute=lambda req: self.execution_engine.execute(
                     req,
                     memory_block=_memory,
-                    legacy_execute=lambda legacy_req: self.router.handle_compatibility(
+                    legacy_execute=lambda legacy_req: self.legacy_executor.handle_compatibility(
                         text,
                         memory_block=_memory,
                         parsed_request=legacy_req,
@@ -134,7 +146,7 @@ class RequestHandler:
         conversation_state_updates = result.metadata.get("conversation_state")
         if not isinstance(conversation_state_updates, dict):
             prior_state = ConversationState.from_memory(_memory)
-            conversation_state_updates = self.router.conversation_state.writeback(result, prior_state)
+            conversation_state_updates = self.conversation_state.writeback(result, prior_state)
         session.record(text, result)
         run_logger.log(
             "request_routed",
@@ -345,10 +357,10 @@ class RequestHandler:
         if intent in {"chat", "clarify"}:
             # Let router/runtime follow-up resolution run before capability gating.
             return None
-        capability = self.router.registry.get(intent)
+        capability = self.registry.get(intent)
         if capability is None:
             # Planner-executable tools are allowed during migration even if capability registry lags.
-            if self.router.tool_executor.get(intent) is not None:
+            if self.tool_executor.get(intent) is not None:
                 return None
             return SamResult(
                 status="failed",
@@ -358,4 +370,4 @@ class RequestHandler:
                 next_action="ask_user",
                 metadata={"intent": intent},
             )
-        return self.router._check_authority(request, capability.action_category)
+        return self.authority_gate.check(request, capability.action_category)

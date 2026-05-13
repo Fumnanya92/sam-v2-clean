@@ -1,4 +1,4 @@
-"""Legacy compatibility adapter for intent execution."""
+"""Legacy compatibility adapter for runtime execution."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from diagnostics.result import SamResult
 
 
 class LegacyIntentAdapter:
-    """Compatibility layer for legacy intent-style execution."""
+    """Compatibility layer for requests that still miss the runtime path."""
 
     def __init__(self, router: Any) -> None:
         self.router = router

@@ -7,9 +7,9 @@ from typing import Any, Callable
 
 from diagnostics.result import SamResult
 from diagnostics.trace import append_trace, trace_step
-from intents import IntentRequest
 
 from .goal_state import GoalState
+from .request_model import IntentRequest
 from .runtime_policy import PolicyDecision, RuntimeDecisionPolicy
 
 
@@ -206,12 +206,18 @@ class WorkflowRuntime:
         events: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         runtime_events: list[dict[str, Any]] = [
-            {"type": "runtime.input", "message": user_text},
-            {"type": "runtime.action", "intent": request.intent, "source": request.source},
+            {"type": "runtime.input", "message": f"Goal received: {user_text}"},
+            {
+                "type": "runtime.action",
+                "intent": request.intent,
+                "source": request.source,
+                "message": f"[Orbit] I selected the next runtime action: {request.intent.replace('_', ' ')}.",
+            },
         ]
         for event in events:
             if not isinstance(event, dict):
                 continue
+            message = WorkflowRuntime._event_message(event)
             runtime_events.append(
                 {
                     "type": "runtime.event",
@@ -221,6 +227,7 @@ class WorkflowRuntime:
                     "action": str(event.get("action", "")),
                     "observation": str(event.get("observation", "")),
                     "reason": str(event.get("reason", "")),
+                    "message": message,
                 }
             )
         runtime_events.append(
@@ -232,6 +239,42 @@ class WorkflowRuntime:
                 "tool": str(result.metadata.get("tool", "")),
                 "command": result.metadata.get("run_command", result.metadata.get("command", "")),
                 "error": result.error_message or "",
+                "message": WorkflowRuntime._result_message(result),
             }
         )
         return runtime_events
+
+    @staticmethod
+    def _event_message(event: dict[str, Any]) -> str:
+        label = str(event.get("label", "")).strip()
+        action = str(event.get("action", "")).strip().replace("_", " ")
+        observation = str(event.get("observation", "")).strip()
+        reason = str(event.get("reason", "")).strip().replace("_", " ")
+        status = str(event.get("status", "")).strip()
+
+        if label == "Runtime stage resolved":
+            return f"[Orbit] Checking current state: {observation or 'idle'}."
+        if label == "Intent hint overridden":
+            why = f" because {reason}" if reason else ""
+            return f"[Orbit] Continuing the active work{why}."
+        if label == "Runtime action selected":
+            detail = f" based on {observation}" if observation else ""
+            return f"[Vector] Next safe action is {action or 'continue'}{detail}."
+        if label == "Runtime policy gate":
+            return f"[Sentinel] Authority check returned {status or 'a result'}: {observation}."
+        if label == "Execution path":
+            return f"[Orbit] Execution moved through {action or 'the runtime'}."
+        if label == "Observation loop":
+            return f"[Echo] Observation loop reported {observation or 'no extra steps'}."
+        if observation:
+            return f"[Echo] {label}: {observation}."
+        if action:
+            return f"[Orbit] {label}: {action}."
+        return label
+
+    @staticmethod
+    def _result_message(result: SamResult) -> str:
+        if result.ok:
+            return f"[Echo] Result: {result.summary}"
+        error = result.error_message or result.summary
+        return f"[Echo] I hit a blocker: {error}"

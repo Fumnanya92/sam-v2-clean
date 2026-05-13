@@ -517,7 +517,6 @@ class ProjectPlanner:
         delegation.append(self._task_entry(run_task, "run_project.py"))
 
         report_path = project_root / "DELEGATION.md"
-        report_text = report_path.read_text(encoding="utf-8")
         report_search = "3. Pilot wrote this delegation report.\n"
         report_replace = (
             "3. Pilot wrote this delegation report.\n"
@@ -541,7 +540,6 @@ class ProjectPlanner:
         delegation.append(self._task_entry(report_task, "DELEGATION.md"))
 
         impl_path = project_root / "IMPLEMENTATION_PLAN.md"
-        impl_text = impl_path.read_text(encoding="utf-8")
         impl_search = "1. Add score tracking and rematch flow.\n"
         impl_replace = "1. Add score tracking and rematch flow. Completed: score tracking shipped.\n"
         impl_result, impl_task = self.tooling_worker.execute_edit(

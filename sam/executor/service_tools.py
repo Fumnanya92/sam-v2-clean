@@ -4,7 +4,7 @@ These handlers wrap utility services (CodebaseCleanupService, SafeLocalTools) an
 register them as executor tools, making them available to the task planner and router.
 
 Service handlers are separated from intent handlers to maintain clear layering:
-- Intent handlers: router-specific business logic (_executor_tools_registry.py)
+- Runtime handlers: compatibility capability logic (runtime_tools_registry.py)
 - Service handlers: reusable utility services (this module)
 """
 

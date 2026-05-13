@@ -1,7 +1,7 @@
-"""Phase 1: All executor tool handlers extracted from router.
+"""Runtime tool registration for Sam's executor.
 
-This module contains the complete tool registry setup that used to be
-scattered across the router's massive handle() method.
+This module contains compatibility capability handlers used by the runtime
+executor while the system migrates away from intent-owned behavior.
 
 Each tool is registered with the executor, taking a payload dict containing:
 - request: IntentRequest
@@ -14,7 +14,6 @@ from pathlib import Path
 import re
 from typing import Any
 
-from approvals import ApprovalManager, AuthorityEngine
 from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
 from projects import ProjectExecutionRequest, ProjectPlanRequest, ProjectScaffoldRequest, inspection_metadata
@@ -138,7 +137,7 @@ def register_all_executor_tools(router: Any) -> None:
     def _list_tasks_handler(payload: dict[str, Any] | None = None) -> SamResult:
         task_result, tasks = list_tasks(router.db_path)
         if not task_result.ok:
-            return router._service_result("list_tasks", task_result)
+            return router.runtime_services.service_result("list_tasks", task_result)
         if not tasks:
             return SamResult(
                 status="success",
@@ -181,7 +180,7 @@ def register_all_executor_tools(router: Any) -> None:
                 metadata={"intent": "create_task"},
             )
         result, task_id = create_task(router.db_path, TaskRecord(title=title))
-        return router._service_result("create_task", result, identifier=str(task_id) if task_id is not None else None)
+        return router.runtime_services.service_result("create_task", result, identifier=str(task_id) if task_id is not None else None)
 
     executor.register(
         "create_task",
@@ -221,7 +220,7 @@ def register_all_executor_tools(router: Any) -> None:
             status=status_text or None,
             notes=notes_text or None,
         )
-        return router._service_result("update_task", result, identifier=str(task.id) if task is not None else task_id_text)
+        return router.runtime_services.service_result("update_task", result, identifier=str(task.id) if task is not None else task_id_text)
 
     executor.register(
         "update_task",
@@ -234,7 +233,7 @@ def register_all_executor_tools(router: Any) -> None:
     def _list_goals_handler(payload: dict[str, Any] | None = None) -> SamResult:
         result, goals = router.goal_service.list_goals(status="active")
         if not result.ok:
-            return router._service_result("list_goals", result)
+            return router.runtime_services.service_result("list_goals", result)
         if not goals:
             return SamResult(
                 status="success",
@@ -273,7 +272,7 @@ def register_all_executor_tools(router: Any) -> None:
                 metadata={"intent": "create_goal"},
             )
         result, goal = router.goal_service.create_goal(title=title)
-        return router._service_result(
+        return router.runtime_services.service_result(
             "create_goal",
             result,
             goal.id if goal else None,
@@ -306,7 +305,7 @@ def register_all_executor_tools(router: Any) -> None:
             )
         file_result, content = router.project_inspector.tools.read_text_file(path_text)
         if not file_result.ok or content is None:
-            return router._service_result("read_file", file_result, metadata={"path": path_text})
+            return router.runtime_services.service_result("read_file", file_result, metadata={"path": path_text})
         lines = content.split("\n") if content else []
         preview = "\n".join(lines[:10])
         if len(lines) > 10:
@@ -380,7 +379,7 @@ def register_all_executor_tools(router: Any) -> None:
             )
         directory_result, entries = router.project_inspector.tools.list_directory(path_text)
         if not directory_result.ok:
-            return router._service_result("list_directory", directory_result, metadata={"path": path_text})
+            return router.runtime_services.service_result("list_directory", directory_result, metadata={"path": path_text})
         preview = entries[:12]
         remaining = max(0, len(entries) - len(preview))
         summary = f"{len(entries)} item(s) in {directory_result.metadata.get('path', path_text)}."
@@ -444,7 +443,7 @@ def register_all_executor_tools(router: Any) -> None:
             )
         approval_result, approvals = router.approval_manager.list_pending()
         if not approval_result.ok:
-            return router._service_result("list_approvals", approval_result)
+            return router.runtime_services.service_result("list_approvals", approval_result)
         if not approvals:
             return SamResult(
                 status="success",
@@ -519,7 +518,7 @@ def register_all_executor_tools(router: Any) -> None:
     def _list_projects_handler(payload: dict[str, Any] | None = None) -> SamResult:
         result, projects = router.project_registry.list_projects()
         if not result.ok:
-            return router._service_result("list_projects", result)
+            return router.runtime_services.service_result("list_projects", result)
         if not projects:
             return SamResult(
                 status="success",
@@ -579,7 +578,7 @@ def register_all_executor_tools(router: Any) -> None:
             )
         project_result, project = router.project_registry.find_project(query)
         if not project_result.ok or project is None:
-            return router._service_result("project_details", project_result, metadata={"query": query})
+            return router.runtime_services.service_result("project_details", project_result, metadata={"query": query})
         return SamResult(
             status="success",
             summary=(
@@ -627,7 +626,7 @@ def register_all_executor_tools(router: Any) -> None:
             )
         project_result, project = router.project_registry.find_project(query)
         if not project_result.ok or project is None:
-            return router._service_result("run_project", project_result, metadata={"query": query})
+            return router.runtime_services.service_result("run_project", project_result, metadata={"query": query})
         if not project.run_command:
             return SamResult(
                 status="failed",
@@ -687,7 +686,7 @@ def register_all_executor_tools(router: Any) -> None:
             )
         project_result, project = router.project_registry.find_project(query)
         if not project_result.ok or project is None:
-            return router._service_result("open_project_folder", project_result, metadata={"query": query})
+            return router.runtime_services.service_result("open_project_folder", project_result, metadata={"query": query})
         if not router.project_inspector.tools.resolve_directory_query(project.root_path)[0].ok:
             return SamResult(
                 status="failed",
@@ -719,7 +718,7 @@ def register_all_executor_tools(router: Any) -> None:
 
     def _inspect_project_repo_handler(payload: dict[str, Any] | None = None) -> SamResult:
         request = payload.get("request") if payload else None
-        query = router._query_or_path_from_request(request) if request else ""
+        query = router.runtime_services.query_or_path_from_request(request) if request else ""
         if not query:
             return SamResult(
                 status="failed",
@@ -731,7 +730,7 @@ def register_all_executor_tools(router: Any) -> None:
             )
         inspect_result, inspection = router.project_inspector.inspect(query)
         if not inspect_result.ok or inspection is None:
-            return router._service_result("inspect_project_repo", inspect_result, metadata={"query": query})
+            return router.runtime_services.service_result("inspect_project_repo", inspect_result, metadata={"query": query})
         metadata = inspection_metadata(inspection)
         metadata["intent"] = "inspect_project_repo"
         changed_summary = (
@@ -758,7 +757,7 @@ def register_all_executor_tools(router: Any) -> None:
 
     def _inspect_git_state_handler(payload: dict[str, Any] | None = None) -> SamResult:
         request = payload.get("request") if payload else None
-        query = router._query_or_path_from_request(request) if request else ""
+        query = router.runtime_services.query_or_path_from_request(request) if request else ""
         if not query:
             return SamResult(
                 status="failed",
@@ -779,13 +778,13 @@ def register_all_executor_tools(router: Any) -> None:
         else:
             directory_result, directory = router.project_inspector.tools.resolve_directory_query(query)
             if not directory_result.ok or directory is None:
-                return router._service_result("inspect_git_state", project_result, metadata={"query": query})
+                return router.runtime_services.service_result("inspect_git_state", project_result, metadata={"query": query})
             project_name = directory.name
             repo_path = str(directory)
 
         git_result, snapshot = router.project_inspector.tools.inspect_git_state(repo_path)
         if not git_result.ok or snapshot is None:
-            return router._service_result("inspect_git_state", git_result, metadata={"query": query})
+            return router.runtime_services.service_result("inspect_git_state", git_result, metadata={"query": query})
         return SamResult(
             status="success",
             summary=f"Git state for {project_name}: branch {snapshot.branch}, clean={snapshot.is_clean}.",
@@ -946,7 +945,7 @@ def register_all_executor_tools(router: Any) -> None:
             body=body,
             content_type=(request.parameters if request else {}).get("content_type", "report"),
         )
-        return router._service_result("create_draft", result, draft.id if draft else None)
+        return router.runtime_services.service_result("create_draft", result, draft.id if draft else None)
 
     executor.register(
         "create_draft",
@@ -958,7 +957,7 @@ def register_all_executor_tools(router: Any) -> None:
 
     def _list_workflows_handler(payload: dict[str, Any] | None = None) -> SamResult:
         result, drafts = router.pipeline_service.list_documents(limit=20)
-        return router._service_result(
+        return router.runtime_services.service_result(
             "list_workflows",
             result,
             metadata={
@@ -980,7 +979,7 @@ def register_all_executor_tools(router: Any) -> None:
 
     def _inspect_repo_handler(payload: dict[str, Any] | None = None) -> SamResult:
         request = payload.get("request") if payload else None
-        query = router._query_or_path_from_request(request) if request else ""
+        query = router.runtime_services.query_or_path_from_request(request) if request else ""
         if not query:
             return SamResult(
                 status="success",
@@ -990,7 +989,7 @@ def register_all_executor_tools(router: Any) -> None:
             )
         inspect_result, inspection = router.project_inspector.inspect(query)
         if not inspect_result.ok or inspection is None:
-            return router._service_result("inspect_repo", inspect_result, metadata={"query": query})
+            return router.runtime_services.service_result("inspect_repo", inspect_result, metadata={"query": query})
         metadata = inspection_metadata(inspection)
         metadata["intent"] = "inspect_repo"
         changed_summary = (
@@ -1028,10 +1027,10 @@ def register_all_executor_tools(router: Any) -> None:
                 metadata={"intent": "scan_codebase_patterns"},
             )
         query = str(request.parameters.get("query", "") or request.parameters.get("path", "")).strip()
-        root_result, root = router._resolve_project_or_directory(query, memory_block)
+        root_result, root = router.runtime_services.resolve_project_or_directory(query, memory_block)
         if not root_result.ok or root is None:
-            return router._service_result("scan_codebase_patterns", root_result, metadata={"query": query})
-        patterns = router._patterns_from_request(request)
+            return router.runtime_services.service_result("scan_codebase_patterns", root_result, metadata={"query": query})
+        patterns = router.runtime_services.patterns_from_request(request)
         if not patterns:
             return SamResult(
                 status="failed",
@@ -1073,10 +1072,10 @@ def register_all_executor_tools(router: Any) -> None:
                 metadata={"intent": "check_python_syntax"},
             )
         query = str(request.parameters.get("query", "") or request.parameters.get("path", "")).strip()
-        root_result, root = router._resolve_project_or_directory(query, memory_block)
+        root_result, root = router.runtime_services.resolve_project_or_directory(query, memory_block)
         if not root_result.ok or root is None:
-            return router._service_result("check_python_syntax", root_result, metadata={"query": query})
-        return router._check_python_syntax(root, request)
+            return router.runtime_services.service_result("check_python_syntax", root_result, metadata={"query": query})
+        return router.runtime_services.check_python_syntax(root, request)
 
     executor.register(
         "check_python_syntax",
@@ -1158,7 +1157,7 @@ def register_all_executor_tools(router: Any) -> None:
 
     def _push_changes_handler(payload: dict[str, Any] | None = None) -> SamResult:
         request = payload.get("request") if payload else None
-        return router._request_push_approval(request)
+        return router.runtime_services.request_push_approval(request)
 
     executor.register(
         "push_changes",

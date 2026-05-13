@@ -6,14 +6,23 @@ from typing import Any, Callable
 
 from diagnostics.result import SamResult
 from diagnostics.trace import append_trace, trace_step
-from intents import IntentRequest, IntentRouter
+
+from .request_model import IntentRequest
 
 
 class RuntimeExecutionEngine:
     """Executes requests via planner/observation loop with legacy fallback."""
 
-    def __init__(self, router: IntentRouter) -> None:
-        self.router = router
+    def __init__(
+        self,
+        *,
+        tool_executor: Any,
+        task_planner: Any,
+        observation_loop: Any,
+    ) -> None:
+        self.tool_executor = tool_executor
+        self.task_planner = task_planner
+        self.observation_loop = observation_loop
 
     def execute(
         self,
@@ -25,7 +34,7 @@ class RuntimeExecutionEngine:
         if request.intent in {"chat", "clarify"}:
             return legacy_execute(request)
 
-        tool_def = self.router.tool_executor.get(request.intent)
+        tool_def = self.tool_executor.get(request.intent)
         if tool_def is None:
             result = legacy_execute(request)
             result.metadata.setdefault("execution_path", "legacy_fallback")
@@ -53,20 +62,20 @@ class RuntimeExecutionEngine:
                         }
                     )
 
-        plan = self.router.task_planner.plan(
+        plan = self.task_planner.plan(
             str(goal_state.get("current_objective", "")).strip() or request.raw_text or request.intent,
             context={
                 "request": request,
                 "memory": memory_block,
                 "intent": request.intent,
-                "available_tools": self.router.tool_executor.available_tools,
+                "available_tools": self.tool_executor.available_tools,
                 "goal_state": goal_state,
                 "runtime_context": runtime_context,
                 "recent_history": recent_history,
                 "observations": observations,
             },
         )
-        result, step_executions = self.router.observation_loop.execute_plan(plan, memory_block)
+        result, step_executions = self.observation_loop.execute_plan(plan, memory_block)
         result.metadata.setdefault("execution_path", "runtime_engine")
         result.metadata.setdefault("execution_steps", len(step_executions))
         result.metadata.setdefault("plan_mode", plan.mode)

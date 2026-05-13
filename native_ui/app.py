@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QRect, QThread, QTimer, Qt
+from PyQt6.QtCore import QRect, QThread, QTimer
 from PyQt6.QtWidgets import QApplication
 
 from core import SamRuntime
@@ -171,9 +171,9 @@ class NativeShellController:
         )
 
         for delay, line in [
-            (240,  "Intent layer classifying request\u2026"),
-            (620,  "Workers standing by for execution..."),
-            (1100, "Preparing next safe action..."),
+            (240,  "Reading the request and current state..."),
+            (620,  "Checking the active goal and recent observations..."),
+            (1100, "Choosing the next safe action..."),
         ]:
             QTimer.singleShot(delay, lambda l=line, s=seq: self._timed_line(s, l))
 
@@ -195,7 +195,7 @@ class NativeShellController:
         result = self._thread.result or SamResult(
             status="failed", summary="Sam did not return a result.", next_action="ask_user"
         )
-        _log(f"Done: status={result.status} intent={result.metadata.get('intent','')!r}")
+        _log(f"Done: status={result.status} action={result.metadata.get('intent','')!r}")
 
         self._remember(result)
         self.orb.set_state("idle" if result.ok else "listening")
@@ -218,11 +218,17 @@ class NativeShellController:
             for event in runtime_events[:16]:
                 if not isinstance(event, dict):
                     continue
+                message = str(event.get("message", "")).strip()
+                if message:
+                    out.append(message)
+                    continue
                 event_type = str(event.get("type", "")).strip()
                 if event_type == "runtime.input":
                     out.append(f"Input: {event.get('message', '')}")
                 elif event_type == "runtime.action":
-                    out.append(f"Action: intent={event.get('intent', '')} source={event.get('source', '')}")
+                    action = str(event.get("intent", "")).replace("_", " ")
+                    source = str(event.get("source", ""))
+                    out.append(f"Action selected: {action} ({source})")
                 elif event_type == "runtime.result":
                     line = f"Result: {event.get('status', '')} next={event.get('next_action', '')}"
                     if event.get("tool"):

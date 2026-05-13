@@ -5,9 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
-from tools import GitStatusSnapshot, SafeLocalTools
+from tools import SafeLocalTools
 
 from .registry import ProjectRecord, ProjectRegistry
 

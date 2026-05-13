@@ -13,7 +13,6 @@ import math
 import random
 import re
 from datetime import datetime
-from pathlib import Path
 
 from PyQt6.QtCore import (
     QPoint, QRect, QRectF, Qt, QUrl,
@@ -21,7 +20,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QFont, QFontMetrics,
-    QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient,
+    QLinearGradient, QPainter, QPen,
 )
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -406,7 +405,7 @@ class _SamBubble(QFrame):
 
         self.setStyleSheet(
             "QFrame { background: #1c1406;"
-            f" border: 1px solid #9a7b29;"
+            " border: 1px solid #9a7b29;"
             " border-radius: 8px; }"
         )
 

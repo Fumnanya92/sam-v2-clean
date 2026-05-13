@@ -1,5 +1,6 @@
 """Sam v2 intent routing package."""
 
-from .router import IntentRequest, IntentRouter
+from core.request_model import IntentRequest
+from .router import IntentRouter
 
 __all__ = ["IntentRequest", "IntentRouter"]

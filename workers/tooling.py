@@ -6,7 +6,6 @@ import difflib
 import json
 import subprocess
 from dataclasses import dataclass, field
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from approvals import ApprovalManager, AuthorityConfig, AuthorityEngine

@@ -230,7 +230,7 @@ class TaskPlanner:
             primary_tool = self._select_tool("create", available_tools) if "create" in available_tools else self._select_tool(None, available_tools)
             steps.append(PlanningStep(
                 thought="Execute primary creation/build action",
-                action=f"Create/build what user requested",
+                action="Create/build what user requested",
                 tool=primary_tool,
                 worker="tool_executor"
             ))
