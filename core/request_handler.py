@@ -15,6 +15,7 @@ from diagnostics.run_logger import RunLogger
 from core.conversation_state import ConversationState
 from intents import IntentRouter
 from memory.manager import load_memory, update_memory
+from memory.long_term import learn, log_turn, snapshot as long_term_snapshot
 from memory.session import save_session_state
 from storage.db import log_audit_event
 from storage.models import AuditEvent
@@ -123,6 +124,16 @@ class RequestHandler:
             summary_logger.write(result, metadata={"session_id": session.session_id})
             return result
 
+        long_term = long_term_snapshot(
+            self.db_path,
+            session_id=session.session_id,
+            query=text,
+            scope=str(_memory.get("daily_state", {}).get("last_project_root_path", {}).get("value", "")),
+        )
+        _memory["long_term"] = {"value": long_term}
+        coding_model = self.router.coding_model_status() if hasattr(self.router, "coding_model_status") else {}
+        _memory["coding_model"] = {"value": coding_model}
+
         parsed_hint = self.request_parser.parse(text, _memory)
         result = ensure_trace(
             self.workflow_runtime.run_turn(
@@ -141,6 +152,12 @@ class RequestHandler:
                     ),
                 ),
             )
+        )
+        self._record_long_term_turns(
+            session_id=session.session_id,
+            user_text=text,
+            result=result,
+            long_term=long_term,
         )
         # Preserve router-produced conversation state; synthesize only when missing.
         conversation_state_updates = result.metadata.get("conversation_state")
@@ -168,6 +185,9 @@ class RequestHandler:
             "last_runtime_status": result.status,
             "last_runtime_summary": result.summary,
         }
+        coding_model_metadata = result.metadata.get("active_coding_model")
+        if coding_model_metadata:
+            daily_state_updates["active_coding_model"] = coding_model_metadata
         if result.metadata.get("project_id"):
             daily_state_updates["last_project_id"] = result.metadata.get("project_id", "")
         if result.metadata.get("name"):
@@ -316,6 +336,61 @@ class RequestHandler:
             )
         summary_logger.write(result, metadata={"session_id": session.session_id})
         return result
+
+    def discover_projects(self) -> SamResult:
+        if hasattr(self.router, "discover_projects"):
+            return self.router.discover_projects()
+        return SamResult(status="success", summary="Project discovery is not available.", next_action="stop")
+
+    def _record_long_term_turns(
+        self,
+        *,
+        session_id: str,
+        user_text: str,
+        result: SamResult,
+        long_term: dict[str, object],
+    ) -> None:
+        scope = str(result.metadata.get("root_path") or result.metadata.get("path") or "")
+        action = str(result.metadata.get("intent", ""))
+        log_turn(
+            self.db_path,
+            session_id=session_id,
+            role="user",
+            message=user_text,
+            action=action,
+            scope=scope,
+        )
+        log_turn(
+            self.db_path,
+            session_id=session_id,
+            role="sam",
+            message=result.summary,
+            action=action,
+            scope=scope,
+            metadata={
+                "status": result.status,
+                "next_action": result.next_action,
+                "autonomous_steps": result.metadata.get("autonomous_steps", 0),
+            },
+        )
+        if result.ok:
+            learn(
+                self.db_path,
+                situation=user_text,
+                what_worked=result.summary[:1000],
+                tool_used=action,
+                scope=scope,
+                metadata={"source": "request_handler"},
+            )
+        elif result.error_message or result.summary:
+            learn(
+                self.db_path,
+                situation=user_text,
+                what_failed=(result.error_message or result.summary)[:1000],
+                tool_used=action,
+                scope=scope,
+                metadata={"source": "request_handler", "long_term_snapshot": bool(long_term)},
+            )
 
     def _save_session_state(self, session: RuntimeSession, run_logger: RunLogger) -> SamResult:
         save_result = save_session_state(self.session_path, session.to_state())

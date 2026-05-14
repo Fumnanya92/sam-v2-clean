@@ -1,6 +1,7 @@
 """Project awareness helpers for Sam v2."""
 
 from .diff_summary import DiffFileSummary, DiffSummary, DiffSummaryService
+from .indexer import ProjectDiscoveryReport, ProjectDiscoveryService
 from .failure_analysis import CommandFailureAnalysis, FailureAnalysisService, resolve_flutter_command
 from .inspector import ProjectInspection, ProjectInspector, inspection_metadata
 from .planning import ProjectExecutionRequest, ProjectPlanRequest, ProjectPlanner
@@ -11,6 +12,8 @@ __all__ = [
     "DiffFileSummary",
     "DiffSummary",
     "DiffSummaryService",
+    "ProjectDiscoveryReport",
+    "ProjectDiscoveryService",
     "CommandFailureAnalysis",
     "FailureAnalysisService",
     "ProjectExecutionRequest",

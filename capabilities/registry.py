@@ -74,6 +74,29 @@ def build_default_registry() -> CapabilityRegistry:
     )
     registry.register(
         Capability(
+            intent="set_coding_model",
+            description="Set the active external coding model used for repo/code delegation.",
+            action_category="write_data",
+            requires_write=True,
+        )
+    )
+    registry.register(
+        Capability(
+            intent="show_coding_model",
+            description="Show the active external coding model and provider availability.",
+            action_category="read_data",
+        )
+    )
+    registry.register(
+        Capability(
+            intent="delegate_coding_task",
+            description="Delegate confirmed repo/code work to the active external coding model.",
+            action_category="execute_command",
+            requires_write=True,
+        )
+    )
+    registry.register(
+        Capability(
             intent="create_goal",
             description="Create a new goal record in the workflow store.",
             action_category="write_data",

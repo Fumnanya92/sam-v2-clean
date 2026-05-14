@@ -47,6 +47,7 @@ LEGACY_WORKER_TYPE_MAP: dict[str, str] = {
 
 
 TOOL_WORKER_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("delegate_coding_task", "coding_model"), "forge"),
     (("discover", "discovery", "find", "search", "scan", "list_directory"), "nova"),
     (("repo", "git", "inspect", "read", "details", "recent_changes"), "atlas"),
     (("log", "trace", "observe"), "echo"),

@@ -39,6 +39,8 @@ class RuntimeDecisionPolicy:
         if "switch tool" in lowered:
             return PolicyDecision("switch_tool", "user_requested_tool_switch")
         if hint.needs_clarification:
+            if self._has_enough_context_to_execute(hint=hint, state=state, recent_history=recent_history):
+                return PolicyDecision("execute", "parser_clarification_overridden_by_operational_context")
             return PolicyDecision("clarify", "parser_requested_clarification")
         if lowered in {"retry", "try again"}:
             return PolicyDecision("retry", "user_requested_retry")
@@ -49,6 +51,25 @@ class RuntimeDecisionPolicy:
             if str(last.get("status", "")).lower() in {"failed", "partial"} and state.current_tool:
                 return PolicyDecision("retry", "prior_step_failed")
         return PolicyDecision("execute", "default_execute")
+
+    @staticmethod
+    def _has_enough_context_to_execute(
+        *,
+        hint: IntentRequest,
+        state: GoalState,
+        recent_history: list[dict[str, object]],
+    ) -> bool:
+        if hint.intent in {"chat", "clarify"}:
+            return False
+        if hint.intent in {"set_coding_model", "show_coding_model"}:
+            return True
+        if hint.intent == "autonomous_request":
+            if state.current_candidates or state.last_observation or state.current_tool:
+                return True
+            for item in reversed(recent_history[-5:]):
+                if str(item.get("root_path", "") or item.get("path", "")).strip():
+                    return True
+        return False
 
     def synthesize_post_result(
         self,

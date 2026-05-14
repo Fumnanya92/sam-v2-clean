@@ -47,6 +47,7 @@ class WorkflowRuntime:
         )
         recent_history = self._recent_history(memory_block)
         parsed_hint = self._promote_operational_goal(user_text, parsed_hint, state)
+        parsed_hint = self._promote_observation_tool_to_autonomous_goal(user_text, parsed_hint)
 
         policy_decision = self.policy.decide_pre_action(
             user_text=user_text,
@@ -149,6 +150,35 @@ class WorkflowRuntime:
         if not is_operational:
             return hint
 
+        parameters = dict(hint.parameters) if isinstance(hint.parameters, dict) else {}
+        parameters.setdefault("objective", user_text.strip())
+        return replace(
+            hint,
+            intent="autonomous_request",
+            parameters=parameters,
+            needs_clarification=False,
+            clarification_question="",
+            response_text="",
+            source="workflow_runtime",
+        )
+
+    @staticmethod
+    def _promote_observation_tool_to_autonomous_goal(user_text: str, hint: IntentRequest) -> IntentRequest:
+        """Treat raw observation tools as steps when the user asked for an answer.
+
+        A parser may choose a scanner because scanning is useful, but a scan is
+        not the final answer to a question. The runtime should keep observing
+        until it can answer or explain the blocker.
+        """
+        if hint.intent != "scan_codebase_patterns":
+            return hint
+        lowered = user_text.strip().lower()
+        asks_for_answer = user_text.strip().endswith("?") or bool(
+            re.match(r"^(what|when|why|how|where|which|who)\b", lowered)
+        )
+        asks_to_check = bool(re.match(r"^(please\s+)?(help\s+me\s+)?(can\s+you\s+)?check\b", lowered))
+        if not (asks_for_answer or asks_to_check):
+            return hint
         parameters = dict(hint.parameters) if isinstance(hint.parameters, dict) else {}
         parameters.setdefault("objective", user_text.strip())
         return replace(

@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from coding_models import CodingDelegationRequest
 from diagnostics.error_types import ErrorType
 from diagnostics.result import SamResult
 from projects import ProjectExecutionRequest, ProjectPlanRequest, ProjectScaffoldRequest, inspection_metadata
@@ -1103,6 +1104,98 @@ def register_all_executor_tools(router: Any) -> None:
         _autonomous_request_handler,
         description="Run an observation-driven read-only autonomous loop",
         action_category="read_data",
+    )
+
+    def _set_coding_model_handler(payload: dict[str, Any] | None = None) -> SamResult:
+        request = payload.get("request") if payload else None
+        model = str((request.parameters if request else {}).get("model", "")).strip()
+        if not model:
+            return SamResult(
+                status="failed",
+                summary="Tell me which coding model to use: codex, claude, or local.",
+                error_type=ErrorType.TOOL_FAILED,
+                error_message="missing model",
+                next_action="ask_user",
+                metadata={"intent": "set_coding_model"},
+            )
+        result = router.coding_model_manager.set_active_model(model)
+        result.metadata.setdefault("intent", "set_coding_model")
+        return result
+
+    executor.register(
+        "set_coding_model",
+        _set_coding_model_handler,
+        description="Set active external coding model",
+        action_category="write_data",
+        requires_write=True,
+    )
+
+    def _show_coding_model_handler(payload: dict[str, Any] | None = None) -> SamResult:
+        result = router.coding_model_manager.status_result()
+        result.metadata.setdefault("intent", "show_coding_model")
+        return result
+
+    executor.register(
+        "show_coding_model",
+        _show_coding_model_handler,
+        description="Show active external coding model",
+        action_category="read_data",
+    )
+
+    def _delegate_coding_task_handler(payload: dict[str, Any] | None = None) -> SamResult:
+        request = payload.get("request") if payload else None
+        memory_block = payload.get("memory") if payload else None
+        coding_gate = payload.get("coding_gate", {}) if payload else {}
+        if request is None:
+            return SamResult(
+                status="failed",
+                summary="Request context is required for coding delegation.",
+                error_type=ErrorType.TOOL_FAILED,
+                error_message="missing request",
+                next_action="ask_user",
+                metadata={"intent": "delegate_coding_task"},
+            )
+        query = str(
+            request.parameters.get("query", "")
+            or request.parameters.get("path", "")
+            or (coding_gate.get("project_query", "") if isinstance(coding_gate, dict) else "")
+            or request.raw_text
+        ).strip()
+        root_result, root = router.runtime_services.resolve_project_or_directory(query, memory_block)
+        if not root_result.ok or root is None:
+            return router.runtime_services.service_result(
+                "delegate_coding_task",
+                root_result,
+                metadata={
+                    "intent": "delegate_coding_task",
+                    "coding_gate": coding_gate,
+                    "query": query,
+                },
+            )
+        context = ""
+        if isinstance(coding_gate, dict):
+            reason = str(coding_gate.get("reason", "")).strip()
+            confidence = str(coding_gate.get("confidence", "")).strip()
+            context = f"Delegation gate: {reason} confidence={confidence}".strip()
+        result = router.coding_model_manager.delegate(
+            CodingDelegationRequest(
+                goal=str(request.parameters.get("goal", "") or request.raw_text).strip(),
+                project_root=str(root),
+                context=context,
+                mode="repo_code",
+            )
+        )
+        result.metadata.setdefault("intent", "delegate_coding_task")
+        result.metadata.setdefault("root_path", str(root))
+        result.metadata.setdefault("coding_gate", coding_gate)
+        return result
+
+    executor.register(
+        "delegate_coding_task",
+        _delegate_coding_task_handler,
+        description="Delegate confirmed repo/code work to the active external coding model",
+        action_category="execute_command",
+        requires_write=True,
     )
 
     def _discovery_workflow_handler(payload: dict[str, Any] | None = None) -> SamResult:

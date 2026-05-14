@@ -182,6 +182,99 @@ def test_model_unavailable_operational_goal_enters_autonomous_loop() -> None:
         assert "day 14" in result.summary or "renewal" in result.summary.lower()
 
 
+def test_parser_clarification_does_not_block_known_project_context() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        project = root / "Estate"
+        project.mkdir()
+        runtime = SamRuntime(
+            db_path=root / "sam.db",
+            memory_path=root / "memory.json",
+            session_path=root / "session.json",
+            workspace_root=root / "sam_v2" / "workspace",
+        )
+        model = _AutonomousModel(
+            {
+                "can you find the estate app": OllamaIntentOutput(
+                    intent="discovery_workflow",
+                    parameters={},
+                    confidence="high",
+                    source="test",
+                ),
+                "1": OllamaIntentOutput(
+                    intent="discovery_workflow",
+                    parameters={},
+                    confidence="high",
+                    source="test",
+                ),
+                "can you check when the renewal window is due": OllamaIntentOutput(
+                    intent="autonomous_request",
+                    parameters={},
+                    needs_clarification=True,
+                    clarification_question="Which project should I inspect?",
+                    confidence="medium",
+                    source="test",
+                ),
+            },
+            actions=[{"action": "final", "answer": "I used the selected project context and continued."}],
+        )
+        runtime.handler.router.model_client = model
+        runtime.handler.request_parser.model_client = model
+        runtime.handler.request_parser.autonomous_runtime.model_client = model
+
+        found = runtime.handle_text("can you find the estate app")
+        selected = runtime.handle_text("1")
+        continued = runtime.handle_text("can you check when the renewal window is due")
+
+        assert found.ok and selected.ok and continued.ok
+        assert selected.metadata.get("root_path") == str(project)
+        assert continued.metadata.get("intent") == "autonomous_request"
+        assert continued.summary == "I used the selected project context and continued."
+        assert "need a bit more detail" not in continued.summary.lower()
+
+
+def test_question_like_scan_hint_enters_autonomous_evidence_loop() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        project = root / "Project"
+        project.mkdir()
+        (project / "rules.txt").write_text("The billing window closes on day 21.\n", encoding="utf-8")
+        runtime = SamRuntime(
+            db_path=root / "sam.db",
+            memory_path=root / "memory.json",
+            session_path=root / "session.json",
+            workspace_root=root / "workspace",
+        )
+        model = _AutonomousModel(
+            {
+                "when does the billing window close in this project": OllamaIntentOutput(
+                    intent="scan_codebase_patterns",
+                    parameters={"query": str(project), "patterns": ["billing window", "close"]},
+                    confidence="high",
+                    source="test",
+                )
+            },
+            actions=[
+                {
+                    "action": "tool",
+                    "tool": "scan_codebase_patterns",
+                    "arguments": {"query": str(project), "patterns": ["billing window", "close"]},
+                },
+                {"action": "final", "answer": "The billing window closes on day 21."},
+            ],
+        )
+        runtime.handler.router.model_client = model
+        runtime.handler.request_parser.model_client = model
+        runtime.handler.request_parser.autonomous_runtime.model_client = model
+
+        result = runtime.handle_text("when does the billing window close in this project")
+
+        assert result.ok
+        assert result.metadata.get("intent") == "autonomous_request"
+        assert result.metadata.get("autonomous_steps", 0) >= 1
+        assert "day 21" in result.summary
+
+
 def test_router_does_not_own_autonomous_runtime_loop() -> None:
     router_source = Path("intents/router.py").read_text(encoding="utf-8")
     assert "_run_autonomous_loop" not in router_source

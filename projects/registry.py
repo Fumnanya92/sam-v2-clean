@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -90,6 +91,40 @@ class ProjectRegistry:
             return SamResult(status="success", summary="Project matched.", next_action="stop"), partial_matches[0]
         if len(partial_matches) > 1:
             names = [record.name for record in partial_matches]
+            return (
+                SamResult(
+                    status="failed",
+                    summary=f"Project query matched multiple projects: {', '.join(names)}.",
+                    error_type=ErrorType.TOOL_FAILED,
+                    error_message="ambiguous project query",
+                    next_action="ask_user",
+                    metadata={"matches": names},
+                ),
+                None,
+            )
+
+        query_terms = [term for term in re.split(r"[^a-zA-Z0-9]+", normalized) if len(term) > 2]
+        scored_matches: list[tuple[int, ProjectRecord]] = []
+        for record in records:
+            haystack = " ".join(
+                [
+                    record.project_id,
+                    record.name,
+                    record.root_path,
+                    record.stack,
+                    " ".join(record.important_files or []),
+                ]
+            ).lower()
+            score = sum(1 for term in query_terms if term in haystack)
+            if score:
+                scored_matches.append((score, record))
+        if scored_matches:
+            scored_matches.sort(key=lambda item: (-item[0], item[1].name.lower()))
+            top_score = scored_matches[0][0]
+            top = [record for score, record in scored_matches if score == top_score]
+            if len(top) == 1:
+                return SamResult(status="success", summary="Project matched.", next_action="stop"), top[0]
+            names = [record.name for record in top[:8]]
             return (
                 SamResult(
                     status="failed",

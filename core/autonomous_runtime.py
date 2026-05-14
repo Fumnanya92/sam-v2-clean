@@ -93,6 +93,19 @@ class AutonomousRuntime:
             )
 
             action = str(decision.get("action", "")).lower()
+            
+            # ENFORCEMENT: If we only have scan results and no file reads, force file reading before allowing "final"
+            if action == "final":
+                used_tools = {str(obs.get("tool", "")).lower() for obs in observations if isinstance(obs, dict)}
+                has_scan = any("scan" in tool or "search" in tool for tool in used_tools)
+                has_read = any("read" in tool for tool in used_tools)
+                if has_scan and not has_read and observations:  # Only enforce if we have observations with scans
+                    # Force file reading before finalizing
+                    forced_read = AutonomousRuntime._force_read_from_scan(observations, tools)
+                    if forced_read is not None:
+                        decision = forced_read
+                        action = "tool"
+            
             if action == "final":
                 guarded_final = self._guard_final_decision(decision, tools, observations, memory_block, request)
                 if guarded_final is not None:
@@ -211,15 +224,36 @@ class AutonomousRuntime:
         observations: list[dict[str, Any]],
         memory_block: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        # ALWAYS use fallback policy first to get its intelligent decision
+        fallback_decision = self.fallback_policy.decide(
+            user_text=getattr(request, "raw_text", ""),
+            tools=tools,
+            observations=observations,
+            memory_block=memory_block,
+            workspace_root=str(self.workspace_root),
+        )
+        
+        # If fallback says "tool" and it's a file read after scans, trust it
+        if str(fallback_decision.get("action", "")).lower() == "tool":
+            tool_name = str(fallback_decision.get("tool", "")).lower()
+            if "read" in tool_name:
+                # This is the fallback policy instructing file reading after scans - use it
+                return fallback_decision
+        
+        # For other cases, try LLM if available
         if self.model_client.is_available():
             try:
-                return self.model_client.choose_autonomous_action(
+                llm_decision = self.model_client.choose_autonomous_action(
                     user_text=getattr(request, "raw_text", ""),
                     tools=tools,
                     observations=observations,
                     memory_block=memory_block,
                     workspace_root=str(self.workspace_root),
                 )
+                # If LLM wants to finalize but fallback says read, use fallback
+                if str(llm_decision.get("action", "")).lower() == "final" and str(fallback_decision.get("action", "")).lower() == "tool":
+                    return fallback_decision
+                return llm_decision
             except Exception as exc:
                 decision = self.fallback_policy.decide(
                     user_text=getattr(request, "raw_text", ""),
@@ -232,16 +266,7 @@ class AutonomousRuntime:
                 decision.setdefault("fallback_reason", str(exc))
                 return decision
 
-        decision = self.fallback_policy.decide(
-            user_text=getattr(request, "raw_text", ""),
-            tools=tools,
-            observations=observations,
-            memory_block=memory_block,
-            workspace_root=str(self.workspace_root),
-        )
-        decision.setdefault("source", "autonomous_fallback")
-        decision.setdefault("fallback_reason", "model unavailable")
-        return decision
+        return fallback_decision
 
     def execute_tool(
         self,
@@ -401,6 +426,66 @@ class AutonomousRuntime:
             if path:
                 paths.add(path.replace("\\", "/").lower())
         return paths
+
+    @staticmethod
+    def _force_read_from_scan(observations: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Force reading a file from scan results when no files have been read yet."""
+        # Find latest scan observation
+        latest_scan = None
+        for obs in reversed(observations):
+            if str(obs.get("tool", "")) == "scan_codebase_patterns":
+                latest_scan = obs
+                break
+        
+        if not latest_scan:
+            return None
+        
+        metadata = latest_scan.get("metadata", {})
+        if not isinstance(metadata, dict):
+            return None
+        
+        matches = metadata.get("matches", [])
+        if not isinstance(matches, list) or not matches:
+            return None
+        
+        # Get the strongest match (first one, already ranked)
+        strongest = matches[0] if matches else None
+        if not strongest:
+            return None
+        
+        file_path = str(strongest.get("path", "")).strip()
+        line_number = int(strongest.get("line_number", 1) or 1)
+        root = str(metadata.get("root_path", "")).strip()
+        
+        if not file_path:
+            return None
+        
+        # Resolve to absolute path for read operation, but use relative path in decision for guard to validate
+        from pathlib import Path
+        candidate = Path(file_path)
+        resolved = str(candidate if candidate.is_absolute() else Path(root) / file_path if root else candidate)
+        
+        # Choose read tool
+        available_tools = {str(tool.get("name", "")) for tool in tools if isinstance(tool, dict)}
+        if "read_file_region" in available_tools:
+            return {
+                "action": "tool",
+                "tool": "read_file_region",
+                "arguments": {
+                    "path": file_path,  # Keep as relative path so guard can score it against matches
+                    "line": line_number,
+                    "context_before": 18,
+                    "context_after": 70,
+                },
+            }
+        elif "read_file" in available_tools:
+            return {
+                "action": "tool",
+                "tool": "read_file",
+                "arguments": {"path": file_path, "max_chars": 12000},  # Keep as relative path
+            }
+        
+        return None
 
     def _fallback_read(self, request: Any, memory_block: dict[str, Any] | None, reason: str) -> SamResult | None:
         roots = self._memory_roots(memory_block)

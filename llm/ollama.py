@@ -31,6 +31,15 @@ class OllamaIntentOutput:
 
 
 @dataclass
+class OllamaWorkKindOutput:
+    work_kind: str
+    requires_repo_code: bool
+    reason: str = ""
+    confidence: str = "low"
+    project_query: str = ""
+
+
+@dataclass
 class GeneratedProjectFile:
     path: str
     content: str
@@ -96,9 +105,54 @@ class OllamaClient:
         workspace_root: str = "",
     ) -> OllamaIntentOutput:
         model = self.resolve_model()
-        memory_json = json.dumps(memory_block or {}, ensure_ascii=True)
         capability_text = ", ".join(capabilities)
         projects_json = json.dumps(known_projects or [], ensure_ascii=True)
+        
+        # Extract recent conversation history for context
+        recent_conversation = ""
+        if isinstance(memory_block, dict):
+            long_term = memory_block.get("long_term", {})
+            if isinstance(long_term, dict):
+                long_term_value = long_term.get("value", {})
+                if isinstance(long_term_value, dict):
+                    conversation_items = long_term_value.get("recent_conversation", [])
+                    if isinstance(conversation_items, list) and conversation_items:
+                        # Build conversation context from recent turns
+                        recent_turns = []
+                        for item in conversation_items[-10:]:  # Last 10 turns for context
+                            if isinstance(item, dict):
+                                role = item.get("role", "unknown")
+                                message = item.get("message", "")
+                                if message:
+                                    recent_turns.append(f"{role.capitalize()}: {message}")
+                        if recent_turns:
+                            recent_conversation = "Recent conversation context:\n" + "\n".join(recent_turns) + "\n"
+        
+        # Build memory summary without recent conversation to avoid duplication
+        memory_summary = {}
+        if isinstance(memory_block, dict):
+            memory_summary = {k: v for k, v in memory_block.items() if k != "long_term"}
+            if memory_block.get("long_term"):
+                long_term_value = memory_block["long_term"].get("value", {})
+                if isinstance(long_term_value, dict):
+                    memory_summary["facts"] = long_term_value.get("relevant_facts", [])[:5]
+                    memory_summary["lessons"] = long_term_value.get("relevant_lessons", [])[:3]
+        
+        memory_json = json.dumps(memory_summary, ensure_ascii=True)
+        
+        # Check if a coding model (not local) is actively selected
+        active_coding_model = ""
+        if isinstance(memory_block, dict):
+            coding_model_info = memory_block.get("coding_model", {})
+            if isinstance(coding_model_info, dict):
+                coding_model_value = coding_model_info.get("value", {})
+                if isinstance(coding_model_value, dict):
+                    active_coding_model = str(coding_model_value.get("active_coding_model", "")).strip()
+        
+        coding_model_instruction = ""
+        if active_coding_model and active_coding_model not in {"local", ""}:
+            coding_model_instruction = f"ACTIVE CODING MODEL: {active_coding_model} is selected. For any task/goal requests that involve coding, analysis, or problem-solving (not pure conversation), route to 'autonomous_request' and let the coding model handle it. Do NOT ask clarification for these tasks - delegate them immediately.\n"
+        
         prompt = "\n".join(
             [
                 "You are Sam's autonomous request understanding layer.",
@@ -108,8 +162,18 @@ class OllamaClient:
                 "Do not invent unsupported capabilities.",
                 "Do not hardcode or assume any specific project name unless it appears in the user's request or Known projects JSON.",
                 "If the user is asking a question about existing work, do not convert it into a create action.",
-                "If the request is ambiguous or unsafe to guess, set needs_clarification to true and provide clarification_question.",
-                "If the request does not map cleanly to a supported action, use intent chat.",
+                coding_model_instruction,
+                "CRITICAL INSTRUCTION: Use recent conversation context to understand follow-up messages.",
+                "If the user previously asked a question and now is providing information (path, filename, folder, directory, confirmation), recognize this as answering the prior question, NOT as a new ambiguous request.",
+                "Patterns that indicate follow-up information (NOT clarification candidates):",
+                "  - User previously asked for a file/path, now provides a path (Windows or Unix style)",
+                "  - User previously asked for confirmation, now says yes/no/confirm",
+                "  - User previously asked for details, now provides specific details",
+                "  - Recent conversation shows same topic/intent from 1-2 turns ago",
+                "When you see a bare path like 'C:\\Users\\...' or '/home/...' in recent context of a file search, it's the USER ANSWERING YOUR QUESTION, not a new request.",
+                "Action: Map the path to list_directory, open_folder, or read_file based on context. Set needs_clarification=false.",
+                "Only ask for clarification if the request is genuinely ambiguous AND cannot be understood from recent conversation history AND is not a follow-up information provision.",
+                "If the request does not map cleanly to a supported action, use intent chat with confidence.",
                 "Prefer action intents over chat when the user is clearly asking Sam to do something local or project-related.",
                 "Supported intents and parameter shapes:",
                 "- capabilities: {}",
@@ -149,8 +213,12 @@ class OllamaClient:
                 "- check_python_syntax: {\"query\": \"project name, id, or local path\"}",
                 "- inspect_recent_changes: {\"query\": \"project name, id, or local repo path\"}",
                 "- autonomous_request: {\"query\": \"optional project name, id, local path, or data source\"}",
+                "- set_coding_model: {\"model\": \"codex|claude|local\"}",
+                "- show_coding_model: {}",
+                "- delegate_coding_task: {\"query\": \"project name, id, or local repo path\", \"goal\": \"...\"}",
                 "- plan_request: {}",
                 "- chat: {}",
+                "Do not choose delegate_coding_task directly for simple conversation. It is only for confirmed repo/code work after Sam's planner delegation gate.",
                 "Use autonomous_request for open-ended investigation, multi-step diagnostic questions, data-source questions, architecture review questions, or requests that need choosing tools before answering.",
                 "For codebase scans, extract the exact user-provided terms into patterns. Do not invent project names.",
                 "For questions about registered executor tools, use list_executor_tools.",
@@ -169,6 +237,7 @@ class OllamaClient:
                 f"Workspace root: {workspace_root}",
                 f"Known projects JSON: {projects_json}",
                 f"Memory context JSON: {memory_json}",
+                recent_conversation,
                 f"User request: {user_text}",
                 'Return fields: intent, parameters, needs_clarification, clarification_question, response_text, confidence.',
             ]
@@ -251,6 +320,13 @@ class OllamaClient:
         workspace_root: str = "",
     ) -> dict[str, Any]:
         model = self.resolve_model()
+        
+        # Check what tools have been used so far
+        used_tools = {str(obs.get("tool", "")).lower() for obs in observations if isinstance(obs, dict)}
+        has_scan_only = used_tools and all("scan" in tool or "search" in tool for tool in used_tools)
+        no_file_reads = not any("read" in tool for tool in used_tools)
+        must_read_files = has_scan_only and no_file_reads
+        
         prompt = "\n".join(
             [
                 "You are Sam's autonomous reasoning loop.",
@@ -262,6 +338,7 @@ class OllamaClient:
                 "If credentials or a data source are needed and not available in observations or memory, ask the user for the path or detail needed.",
                 "For codebase scans, pass exact user-provided search terms as patterns.",
                 "For follow-ups, use memory and observations to preserve context.",
+                "** CRITICAL RULE **: If observations contain scan/search results (finding patterns in files) but NO file reads yet, you MUST NOT answer 'final'. You MUST use read_file or read_file_region to examine the actual file content. After scan results, always read the relevant files to extract concrete information before providing a final answer.",
                 "JSON shape:",
                 '{"action":"tool","tool":"tool_name","arguments":{}}',
                 "or",
@@ -273,6 +350,7 @@ class OllamaClient:
                 f"Memory JSON: {json.dumps(memory_block or {}, ensure_ascii=True)[:6000]}",
                 f"Observations JSON: {json.dumps(observations, ensure_ascii=True)[:10000]}",
                 f"User request: {user_text}",
+                (">> ENFORCEMENT: You found scan results but no file reads. NEXT ACTION MUST BE: read_file_region or read_file." if must_read_files else ""),
             ]
         )
         payload = {"model": model, "prompt": prompt, "stream": False, "format": "json"}
@@ -289,6 +367,44 @@ class OllamaClient:
             return parsed
         parsed["arguments"] = {}
         return parsed
+
+    def classify_work_kind(
+        self,
+        user_text: str,
+        *,
+        memory_block: dict[str, Any] | None = None,
+        known_projects: list[dict[str, str]] | None = None,
+    ) -> OllamaWorkKindOutput:
+        model = self.resolve_model()
+        prompt = "\n".join(
+            [
+                "You are Sam's delegation gate.",
+                "Return JSON only. Answer one question: should this user request be handled conversationally/local, or delegated to an external coding model because it requires reading or editing a repo/code project?",
+                "Choose repo_code only when the request requires inspecting source files, debugging code, writing code, editing files, running tests, reviewing a repository, or reasoning over a project codebase.",
+                "Choose conversational for greetings, general questions, status questions, simple explanations, capability questions, or anything that can be answered without reading/editing a repo.",
+                "Do not use domain keywords as rules. Decide from the goal and available context.",
+                'JSON shape: {"work_kind":"conversational|repo_code","requires_repo_code":true|false,"reason":"...","confidence":"low|medium|high","project_query":"optional project name/path from user or memory"}',
+                f"Known projects JSON: {json.dumps(known_projects or [], ensure_ascii=True)}",
+                f"Memory JSON: {json.dumps(memory_block or {}, ensure_ascii=True)[:6000]}",
+                f"User request: {user_text}",
+            ]
+        )
+        payload = {"model": model, "prompt": prompt, "stream": False, "format": "json"}
+        response = self._request("POST", "/api/generate", payload)
+        raw_body = str(response.get("response", "")).strip()
+        parsed = self._parse_json_object(raw_body)
+        if not isinstance(parsed, dict):
+            raise ValueError("Ollama work-kind response was not valid JSON.")
+        work_kind = str(parsed.get("work_kind", "conversational") or "conversational").strip().lower()
+        if work_kind not in {"conversational", "repo_code"}:
+            work_kind = "conversational"
+        return OllamaWorkKindOutput(
+            work_kind=work_kind,
+            requires_repo_code=bool(parsed.get("requires_repo_code", work_kind == "repo_code")),
+            reason=str(parsed.get("reason", "") or ""),
+            confidence=str(parsed.get("confidence", "low") or "low"),
+            project_query=str(parsed.get("project_query", "") or ""),
+        )
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None

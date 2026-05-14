@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 class PlanningStepStatus(str, Enum):
@@ -88,8 +88,14 @@ class TaskPlanner:
     by analyzing the user goal and available tools.
     """
 
-    def __init__(self, capability_registry: Any | None = None) -> None:
+    def __init__(
+        self,
+        capability_registry: Any | None = None,
+        *,
+        work_kind_classifier: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    ) -> None:
         self.capability_registry = capability_registry
+        self.work_kind_classifier = work_kind_classifier
 
     def plan(self, request: str, context: Mapping[str, Any] | None = None) -> TaskPlan:
         """Generate a direct or multi-step execution plan based on request complexity.
@@ -117,6 +123,30 @@ class TaskPlanner:
             requested_tool = self._first_present(goal_state.get("current_tool"), requested_tool)
 
         plan_action = self._plan_action_from_context(runtime_context, goal_state)
+        coding_gate = self._classify_for_coding_delegation(normalized_request, context_data, available_tools)
+        if coding_gate.get("delegate"):
+            payload = {
+                "request": context_data.get("request", normalized_request),
+                "context": context_data,
+                "runtime_context": runtime_context,
+                "goal_state": goal_state,
+                "coding_gate": coding_gate,
+            }
+            request_obj = context_data.get("request")
+            request_parameters = getattr(request_obj, "parameters", None)
+            if isinstance(request_parameters, dict):
+                payload.update({key: value for key, value in request_parameters.items() if not str(key).startswith("_")})
+            memory_block = context_data.get("memory")
+            if memory_block is not None:
+                payload["memory"] = memory_block
+            return TaskPlan(
+                goal=normalized_request,
+                tool_name="delegate_coding_task",
+                payload=payload,
+                mode="direct",
+                plan_action=PlanAction.delegate,
+            )
+
         # Explicit tool requests already have an execution target. Keep those
         # direct so metadata and tool observations are not swallowed by generic
         # planner-only steps.
@@ -157,6 +187,74 @@ class TaskPlanner:
             plan_action=plan_action,
         )
 
+    def _classify_for_coding_delegation(
+        self,
+        request: str,
+        context_data: Mapping[str, Any],
+        available_tools: set[str],
+    ) -> dict[str, Any]:
+        if "delegate_coding_task" not in available_tools:
+            return {"delegate": False, "work_kind": "conversational", "reason": "delegation tool unavailable"}
+
+        memory_block = context_data.get("memory")
+        coding_model = {}
+        if isinstance(memory_block, dict):
+            raw = memory_block.get("coding_model", {})
+            coding_model = raw.get("value", raw) if isinstance(raw, dict) else {}
+        active_model = str(coding_model.get("active_coding_model", "local") if isinstance(coding_model, dict) else "local").lower()
+        if active_model in {"", "local"}:
+            return {"delegate": False, "work_kind": "conversational", "reason": "external coding model is off"}
+
+        request_obj = context_data.get("request")
+        requested_intent = str(getattr(request_obj, "intent", context_data.get("intent", ""))).strip()
+        if requested_intent in {"chat", "clarify", "set_coding_model", "show_coding_model", "capabilities"}:
+            return {"delegate": False, "work_kind": "conversational", "reason": "local/control request"}
+
+        if self.work_kind_classifier is None:
+            if requested_intent == "autonomous_request":
+                return {
+                    "delegate": True,
+                    "work_kind": "autonomous_request",
+                    "requires_repo_code": True,
+                    "confidence": "high",
+                    "reason": "active external coding model handles autonomous investigation",
+                    "active_coding_model": active_model,
+                }
+            return {"delegate": False, "work_kind": "conversational", "reason": "classifier unavailable"}
+
+        try:
+            classification = dict(self.work_kind_classifier(request, context_data))
+        except Exception as exc:
+            if requested_intent == "autonomous_request":
+                return {
+                    "delegate": True,
+                    "work_kind": "autonomous_request",
+                    "requires_repo_code": True,
+                    "confidence": "high",
+                    "reason": f"active external coding model handles autonomous investigation; classifier failed: {exc}",
+                    "active_coding_model": active_model,
+                }
+            return {"delegate": False, "work_kind": "conversational", "reason": f"classifier failed: {exc}"}
+
+        work_kind = str(classification.get("work_kind", "conversational")).lower()
+        requires_repo_code = bool(classification.get("requires_repo_code", work_kind == "repo_code"))
+        confidence = str(classification.get("confidence", "low")).lower()
+        delegate = work_kind == "repo_code" and requires_repo_code and confidence in {"medium", "high"}
+        if requested_intent == "autonomous_request" and not delegate:
+            classification.setdefault("classifier_work_kind", work_kind)
+            classification["work_kind"] = "autonomous_request"
+            classification["requires_repo_code"] = True
+            classification["confidence"] = "high"
+            classification["delegate"] = True
+            classification["active_coding_model"] = active_model
+            classification["reason"] = "active external coding model handles autonomous investigation"
+            return classification
+        classification["delegate"] = delegate
+        classification.setdefault("active_coding_model", active_model)
+        if not delegate:
+            classification.setdefault("reason", "classifier did not select repo/code delegation")
+        return classification
+
     def _plan_action_from_context(self, runtime_context: dict[str, Any], goal_state: dict[str, Any]) -> PlanAction:
         decision = str(runtime_context.get("decision", "")).strip().lower()
         decision_map = {
@@ -169,11 +267,27 @@ class TaskPlanner:
             "synthesize": PlanAction.synthesize,
             "execute": PlanAction.execute,
         }
+        if decision == "clarify" and self._has_operational_context_for_tool(runtime_context, goal_state):
+            return PlanAction.execute
         if decision in decision_map:
             return decision_map[decision]
         if str(goal_state.get("next_expected_action", "")).strip().lower() == "ask_user":
             return PlanAction.clarify
         return PlanAction.execute
+
+    @staticmethod
+    def _has_operational_context_for_tool(runtime_context: dict[str, Any], goal_state: dict[str, Any]) -> bool:
+        if str(goal_state.get("current_tool", "")).strip() or str(goal_state.get("last_observation", "")).strip():
+            return True
+        candidates = goal_state.get("current_candidates", [])
+        if isinstance(candidates, list) and candidates:
+            return True
+        recent_history = runtime_context.get("recent_history", [])
+        if isinstance(recent_history, list):
+            for item in reversed(recent_history[-5:]):
+                if isinstance(item, dict) and str(item.get("root_path", "") or item.get("path", "")).strip():
+                    return True
+        return False
 
     def _is_complex_request(self, request: str, available_tools: set[str]) -> bool:
         """Determine if a request requires multi-step planning.

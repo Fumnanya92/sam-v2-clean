@@ -263,7 +263,7 @@ class ObservationLoop:
         return str(runtime_context.get("decision", "")).strip().lower()
 
     def _result_for_plan_action(self, plan: TaskPlan) -> tuple[SamResult, list[StepExecution]] | None:
-        if plan.plan_action in {PlanAction.execute, PlanAction.continue_flow, PlanAction.retry}:
+        if plan.plan_action in {PlanAction.execute, PlanAction.continue_flow, PlanAction.retry, PlanAction.delegate}:
             return None
         if plan.plan_action == PlanAction.clarify:
             return (
@@ -291,16 +291,6 @@ class ObservationLoop:
                     status="success",
                     summary="Synthesizing from recent observations.",
                     next_action="stop",
-                    metadata={"execution_mode": "policy", "plan_action": plan.plan_action.value},
-                ),
-                [],
-            )
-        if plan.plan_action == PlanAction.delegate:
-            return (
-                SamResult(
-                    status="success",
-                    summary="Delegation requested by planner policy.",
-                    next_action="ask_user",
                     metadata={"execution_mode": "policy", "plan_action": plan.plan_action.value},
                 ),
                 [],

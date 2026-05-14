@@ -7,6 +7,7 @@ from typing import Any
 
 from approvals import ApprovalManager, AuthorityEngine
 from capabilities import CapabilityAwarenessService, CapabilityRegistry, build_default_registry
+from coding_models import CodingModelManager
 from core.autonomous_runtime import AutonomousRuntime, RuntimeServices
 from core.authority_gate import RuntimeAuthorityGate
 from core.contextual_resolver import ContextualRequestResolver
@@ -29,6 +30,7 @@ from projects import (
     ProjectPlanner,
     ProjectRegistry,
     ProjectScaffolder,
+    ProjectDiscoveryService,
 )
 from tools import SafeLocalTools, WorkspaceCleanupService
 from upgrades import UpgradeProposalManager
@@ -59,6 +61,8 @@ class IntentRouter:
         self.model_client = model_client or OllamaClient()
         self.workspace_root = Path(workspace_root) if workspace_root is not None else Path.cwd() / "sam_v2" / "workspace"
         self.project_registry = ProjectRegistry(self.db_path.with_name("projects.json"))
+        self.project_discovery = ProjectDiscoveryService(self.project_registry)
+        self.coding_model_manager = CodingModelManager(self.db_path.with_name("coding_models.json"))
         self.upgrade_manager = UpgradeProposalManager(self.db_path.with_name("upgrades.json"))
         self.project_inspector = ProjectInspector(
             registry=self.project_registry,
@@ -94,7 +98,7 @@ class IntentRouter:
             upgrade_manager=self.upgrade_manager,
         )
         self.legacy_adapter = LegacyIntentAdapter(self)
-        self.task_planner = TaskPlanner(self.registry)
+        self.task_planner = TaskPlanner(self.registry, work_kind_classifier=self.classify_work_kind)
         self.tool_executor = ToolExecutor()
         self._register_executor_tools()
         self._base_executor = self.tool_executor
@@ -121,6 +125,49 @@ class IntentRouter:
             observation_loop=self.observation_loop,
         )
 
+    def discover_projects(self) -> SamResult:
+        roots = [
+            self.workspace_root,
+            self.workspace_root / "projects",
+            self.workspace_root.parent,
+            Path.cwd(),
+            Path.cwd().parent,
+        ]
+        result, _report = self.project_discovery.scan(roots, max_depth=2)
+        return result
+
+    def coding_model_status(self) -> dict[str, object]:
+        return self.coding_model_manager.status_metadata()
+
+    def classify_work_kind(self, user_text: str, context: Any | None = None) -> dict[str, object]:
+        if not self.model_client.is_available():
+            return {
+                "work_kind": "conversational",
+                "requires_repo_code": False,
+                "confidence": "low",
+                "reason": "local classifier model unavailable",
+            }
+        memory_block = context.get("memory") if isinstance(context, dict) else None
+        list_result, projects = self.project_registry.list_projects()
+        known_projects = []
+        if list_result.ok:
+            known_projects = [
+                {"project_id": project.project_id, "name": project.name, "root_path": project.root_path}
+                for project in projects[:25]
+            ]
+        output = self.model_client.classify_work_kind(
+            user_text,
+            memory_block=memory_block,
+            known_projects=known_projects,
+        )
+        return {
+            "work_kind": output.work_kind,
+            "requires_repo_code": output.requires_repo_code,
+            "reason": output.reason,
+            "confidence": output.confidence,
+            "project_query": output.project_query,
+        }
+
     def parse(self, user_text: str, memory_block: dict[str, Any] | None = None) -> IntentRequest:
         """Understand a user request with the model first.
 
@@ -139,6 +186,10 @@ class IntentRouter:
                 confidence="high",
             )
 
+        coding_model_command = self._parse_coding_model_command(text)
+        if coding_model_command is not None:
+            return coding_model_command
+
         safety_request = self._parse_with_safety_rules(text)
         if safety_request is not None:
             return safety_request
@@ -150,6 +201,30 @@ class IntentRouter:
             return enriched
 
         return self._parse_with_rules(text)
+
+    def _parse_coding_model_command(self, text: str) -> IntentRequest | None:
+        lowered = text.strip().lower()
+        command_map = {
+            "/codex": "codex",
+            "/claude": "claude",
+            "/local": "local",
+        }
+        if lowered in command_map:
+            return IntentRequest(
+                intent="set_coding_model",
+                raw_text=text,
+                parameters={"model": command_map[lowered]},
+                source="runtime_control",
+                confidence="high",
+            )
+        if lowered in {"/coding-model", "/coding_model"}:
+            return IntentRequest(
+                intent="show_coding_model",
+                raw_text=text,
+                source="runtime_control",
+                confidence="high",
+            )
+        return None
 
     def _parse_with_safety_rules(self, text: str) -> IntentRequest | None:
         """Only deterministic safety/approval rules live here.

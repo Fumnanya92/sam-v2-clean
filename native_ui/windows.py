@@ -471,6 +471,8 @@ class DashboardWindow(QWidget):
 
         self._state_chip = _chip("IDLE", "idle")
         hlay.addWidget(self._state_chip)
+        self._coding_chip = _chip("MODEL: LOCAL", "idle")
+        hlay.addWidget(self._coding_chip)
         hlay.addSpacing(8)
 
         close_b = _btn("✕", danger=True)
@@ -532,6 +534,10 @@ class DashboardWindow(QWidget):
         standby = _btn("◎  STANDBY", accent=_CYN)
         standby.clicked.connect(self.idle_requested.emit)
         bot_row.addWidget(standby)
+        for label, command in (("CODEX", "/codex"), ("CLAUDE", "/claude"), ("LOCAL", "/local")):
+            model_btn = _btn(label, accent=_MINT)
+            model_btn.clicked.connect(lambda _checked=False, c=command: self.submitted.emit(c))
+            bot_row.addWidget(model_btn)
         bot_row.addStretch()
         inp_lay.addLayout(bot_row)
         root.addWidget(inp_frame)
@@ -558,6 +564,16 @@ class DashboardWindow(QWidget):
         bg  = _SBG.get(key, _SBG["idle"])
         self._state_chip.setText(state.upper())
         self._state_chip.setStyleSheet(
+            f"color: {_CYN}; font-size: 9px;"
+            f" background: {bg}; padding: 3px 10px; border-radius: 3px;"
+        )
+
+    def set_coding_model(self, model: str) -> None:
+        value = (model or "local").upper()
+        state = "done" if value not in {"", "LOCAL"} else "idle"
+        bg = _SBG.get(state, _SBG["idle"])
+        self._coding_chip.setText(f"MODEL: {value}")
+        self._coding_chip.setStyleSheet(
             f"color: {_CYN}; font-size: 9px;"
             f" background: {bg}; padding: 3px 10px; border-radius: 3px;"
         )

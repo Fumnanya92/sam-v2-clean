@@ -10,6 +10,7 @@ from diagnostics.reporting import ActionLogger, ErrorLogger, SummaryLogger
 from diagnostics.result import SamResult
 from diagnostics.run_logger import RunLogger
 from storage.db import init_storage
+from memory.long_term import ensure_schema as ensure_long_term_schema
 
 from .request_handler import RequestHandler
 from .session import RuntimeSession
@@ -87,6 +88,27 @@ class SamRuntime:
             )
             self.summary_logger.write(approval_result, metadata={"phase": "startup"})
             return approval_result
+
+        long_term_result = ensure_long_term_schema(self.db_path)
+        self.run_logger.log(
+            "long_term_memory_initialized",
+            {"status": long_term_result.status, "summary": long_term_result.summary},
+        )
+        if not long_term_result.ok:
+            self.error_logger.log(
+                event="long_term_memory_failed",
+                error_type=long_term_result.error_type,
+                error_message=long_term_result.error_message or long_term_result.summary,
+                metadata={"db_path": str(self.db_path)},
+            )
+            self.summary_logger.write(long_term_result, metadata={"phase": "startup"})
+            return long_term_result
+
+        discovery_result = self.handler.discover_projects()
+        self.run_logger.log(
+            "projects_discovered",
+            {"status": discovery_result.status, "summary": discovery_result.summary},
+        )
 
         self._started = True
         result = SamResult(

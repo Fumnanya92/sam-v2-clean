@@ -26,11 +26,56 @@ class ContextualRequestResolver:
         memory_block: dict[str, Any] | None,
     ) -> Any:
         daily_state = memory_block.get("daily_state", {}) if isinstance(memory_block, dict) else {}
-        last_file_path = str(daily_state.get("last_file_path", {}).get("value", "")).strip()
-        last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "")).strip()
-        last_runtime_intent = str(daily_state.get("last_runtime_intent", {}).get("value", "")).strip().lower()
-        last_runtime_summary = str(daily_state.get("last_runtime_summary", {}).get("value", "")).strip()
+        last_file_path = str(daily_state.get("last_file_path", {}).get("value", "") or daily_state.get("last_file_path", "")).strip()
+        last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "") or daily_state.get("last_project_root_path", "")).strip()
+        last_runtime_intent = str(daily_state.get("last_runtime_intent", {}).get("value", "") or daily_state.get("last_runtime_intent", "")).strip().lower()
+        last_runtime_summary = str(daily_state.get("last_runtime_summary", {}).get("value", "") or daily_state.get("last_runtime_summary", "")).strip()
         pending_scaffold = _pending_scaffold(memory_block)
+        
+        # Check if a coding model is active
+        active_coding_model = ""
+        if isinstance(memory_block, dict):
+            coding_model_info = memory_block.get("coding_model", {})
+            if isinstance(coding_model_info, dict):
+                coding_model_value = coding_model_info.get("value", {})
+                if isinstance(coding_model_value, dict):
+                    active_coding_model = str(coding_model_value.get("active_coding_model", "")).strip()
+        
+        corrected_repo = _corrected_repo_path(text)
+        if active_coding_model and active_coding_model not in {"local", ""} and corrected_repo:
+            previous_goal = _previous_delegated_goal(memory_block)
+            if previous_goal:
+                request.intent = "autonomous_request"
+                request.parameters = {"query": corrected_repo, "path": corrected_repo, "goal": previous_goal}
+                request.raw_text = previous_goal
+                request.needs_clarification = False
+                request.clarification_question = ""
+                request.source = "corrected_repo_context"
+                return request
+
+        # If a coding model (not local) is active and request is clarify/chat for a task, delegate to autonomous_request
+        if active_coding_model and active_coding_model not in {"local", ""}:
+            if request.intent in {"clarify", "chat"} and self._looks_like_task(text):
+                request.intent = "autonomous_request"
+                request.parameters = {"query": text}
+                request.needs_clarification = False
+                request.clarification_question = ""
+                request.source = request.source or "coding_delegation"
+                return request
+
+        # Handle path/file follow-ups: if previous turn asked about files and current is a path, resolve it
+        if (
+            request.intent in {"clarify", "chat"}
+            and self._is_likely_path(text)
+            and self._was_asking_for_file_or_path(last_runtime_summary)
+        ):
+            # User is providing a path in response to "which file" or "what path" question
+            request.intent = "list_directory"
+            request.parameters = {"path": text}
+            request.needs_clarification = False
+            request.clarification_question = ""
+            request.source = request.source or "context"
+            return request
 
         if request.intent == "chat" and _asks_about_known_projects(text):
             request.intent = "list_projects"
@@ -85,6 +130,79 @@ class ContextualRequestResolver:
             request.clarification_question = ""
 
         return request
+
+    def _is_likely_path(self, text: str) -> bool:
+        """Detect if text looks like a file or directory path."""
+        t = text.strip()
+        # Windows paths: C:\, D:\, etc.
+        if len(t) > 2 and t[1] == ":" and t[0].isalpha():
+            return True
+        # Unix paths: /home, /Users, /tmp, etc.
+        if t.startswith("/"):
+            return True
+        # UNC paths: \\server\share
+        if t.startswith("\\\\"):
+            return True
+        return False
+
+    def _was_asking_for_file_or_path(self, last_summary: str) -> bool:
+        """Check if the last response was asking for a file or path."""
+        if not last_summary:
+            return False
+        lowered = last_summary.lower()
+        keywords = {
+            "file",
+            "path",
+            "directory",
+            "folder",
+            "location",
+            "where",
+            "which file",
+            "exact file",
+            "spreadsheet",
+            "document",
+        }
+        return any(keyword in lowered for keyword in keywords)
+
+    def _looks_like_task(self, text: str) -> bool:
+        """Detect if text looks like a task/goal request, not pure conversation."""
+        lowered = text.lower()
+        # Task indicators
+        task_keywords = {
+            "help",
+            "check",
+            "find",
+            "inspect",
+            "analyze",
+            "review",
+            "fix",
+            "build",
+            "create",
+            "debug",
+            "optimize",
+            "refactor",
+            "test",
+            "verify",
+            "validate",
+            "diagnose",
+            "investigate",
+            "improve",
+            "enhance",
+            "solve",
+        }
+        conversation_only = {
+            "how are you",
+            "what's up",
+            "hello",
+            "hi",
+            "thanks",
+            "thank you",
+            "please",
+            "sorry",
+        }
+        if lowered.strip() in conversation_only:
+            return False
+        return any(keyword in lowered for keyword in task_keywords)
 
     def _apply_scaffold_followup(
         self,
@@ -230,6 +348,40 @@ def _path_from_text(text: str) -> str:
             break
         candidate = parent.rstrip("\\/")
     return match.group(0).strip().rstrip(".,;")
+
+
+def _corrected_repo_path(text: str) -> str:
+    lowered = text.lower()
+    correction_markers = (
+        "wrong repo",
+        "correct repo",
+        "right repo",
+        "wrong project",
+        "correct project",
+        "right project",
+    )
+    if not any(marker in lowered for marker in correction_markers):
+        return ""
+    return _path_from_text(text)
+
+
+def _previous_delegated_goal(memory_block: dict[str, Any] | None) -> str:
+    if not isinstance(memory_block, dict):
+        return ""
+    recent = memory_block.get("conversation", {}).get("recent_requests", {}).get("value", [])
+    if not isinstance(recent, list):
+        return ""
+    for item in reversed(recent):
+        if not isinstance(item, dict):
+            continue
+        intent = str(item.get("intent", "")).strip()
+        request_text = str(item.get("request", "")).strip()
+        if intent not in {"delegate_coding_task", "autonomous_request"} or not request_text:
+            continue
+        if _corrected_repo_path(request_text):
+            continue
+        return request_text
+    return ""
 
 
 def _wants_summary(text: str) -> bool:

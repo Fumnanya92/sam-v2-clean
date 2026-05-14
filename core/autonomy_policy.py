@@ -311,7 +311,7 @@ def _query_terms(patterns: list[str]) -> set[str]:
     terms: set[str] = set()
     for pattern in patterns:
         for token in re.findall(r"[a-zA-Z0-9_]+", pattern.lower()):
-            if len(token) <= 2 or token in _QUERY_STOPWORDS:
+            if len(token) <= 3:
                 continue
             terms.add(token)
             if token.endswith("ies") and len(token) > 4:
@@ -406,51 +406,6 @@ def _normalize_path_key(path: str) -> str:
 def _path_excluded(path: str, excluded: set[str]) -> bool:
     candidate = _normalize_path_key(path)
     return any(candidate == item or item.endswith(f"/{candidate}") for item in excluded)
-
-
-_QUERY_STOPWORDS = {
-    "about",
-    "after",
-    "again",
-    "also",
-    "app",
-    "are",
-    "because",
-    "before",
-    "can",
-    "check",
-    "code",
-    "could",
-    "doc",
-    "docs",
-    "file",
-    "find",
-    "folder",
-    "for",
-    "from",
-    "have",
-    "help",
-    "into",
-    "know",
-    "let",
-    "look",
-    "need",
-    "please",
-    "project",
-    "repo",
-    "saw",
-    "show",
-    "tell",
-    "that",
-    "the",
-    "this",
-    "was",
-    "what",
-    "when",
-    "where",
-    "with",
-    "you",
-}
 
 
 def _synthesize(user_text: str, observations: list[dict[str, Any]]) -> str:

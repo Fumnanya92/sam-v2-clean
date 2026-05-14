@@ -114,6 +114,7 @@ class NativeShellController:
         self._layout(initial=True)
         self.dashboard.hide()
         self.task_popup.hide()
+        self._refresh_coding_model_chip()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -137,6 +138,7 @@ class NativeShellController:
         self.task_popup.raise_()
         self.orb.raise_()
         self.dashboard.set_state("Ready")
+        self._refresh_coding_model_chip()
         self.task_popup.set_task("Ready", "Idle", ["Waiting for your next instruction."])
 
     def go_idle(self) -> None:
@@ -198,6 +200,7 @@ class NativeShellController:
         _log(f"Done: status={result.status} action={result.metadata.get('intent','')!r}")
 
         self._remember(result)
+        self._remember_coding_model(result)
         self.orb.set_state("idle" if result.ok else "listening")
         self.dashboard.set_state(result.status.upper())
         self.dashboard.append_chat_message("Sam", self._format_reply(result))
@@ -261,6 +264,15 @@ class NativeShellController:
                 out.append(f"{prefix}{val}")
         if r.metadata.get("run_command"):
             out.append("Command: " + " ".join(r.metadata["run_command"]))
+        if r.metadata.get("active_coding_model"):
+            out.append(f"Coding Model: {r.metadata['active_coding_model']}")
+        if r.metadata.get("coding_gate"):
+            gate = r.metadata.get("coding_gate")
+            if isinstance(gate, dict):
+                reason = str(gate.get("reason", "")).strip()
+                kind = str(gate.get("work_kind", "")).strip()
+                confidence = str(gate.get("confidence", "")).strip()
+                out.append(f"Delegation Gate: {kind} ({confidence})" + (f" - {reason}" if reason else ""))
         if r.metadata.get("tool_trace"):
             out.append("Autonomous tool trace:")
             for step in r.metadata["tool_trace"][:8]:
@@ -324,6 +336,9 @@ class NativeShellController:
             lines.append(f"Location: {r.metadata['root_path']}")
         if r.status == "needs_approval":
             lines += ["", "Approval required before I continue."]
+        if intent in {"set_coding_model", "show_coding_model"} and r.metadata.get("coding_models"):
+            lines.append("")
+            lines.append(f"Active coding model: {r.metadata.get('active_coding_model', 'local')}")
         return "\n".join(lines)
 
     def _display_title(self, r: SamResult) -> str:
@@ -339,6 +354,11 @@ class NativeShellController:
         for key in ("project_id", "name", "root_path"):
             if r.metadata.get(key):
                 self._project[key] = str(r.metadata[key])
+
+    def _remember_coding_model(self, r: SamResult) -> None:
+        model = str(r.metadata.get("active_coding_model", "") or "").strip()
+        if model:
+            self.dashboard.set_coding_model(model)
 
     def _project_name(self) -> str:
         if not self._project:
@@ -359,6 +379,13 @@ class NativeShellController:
             v = str(ds.get(mk, {}).get("value", "")).strip()
             if v:
                 self._project[k] = v
+
+    def _refresh_coding_model_chip(self) -> None:
+        try:
+            status = self.runtime.handler.router.coding_model_status()
+        except Exception:
+            status = {}
+        self.dashboard.set_coding_model(str(status.get("active_coding_model", "local")))
 
     # ── worker drain ──────────────────────────────────────────────────────────
 

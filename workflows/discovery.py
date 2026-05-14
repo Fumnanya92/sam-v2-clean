@@ -445,6 +445,7 @@ class DiscoveryWorkflow:
             ) | {
                 "intent": "list_directory",
                 "path": selected,
+                "root_path": selected,
                 "entries": entries[:100],
                 "entry_count": len(entries),
             },
