@@ -205,7 +205,8 @@ class WorkflowRuntime:
         retry_markers = {"retry", "try again"}
         if (
             hint.intent in {"chat", "clarify"}
-            and state.current_tool
+            and self._is_operational_tool(state.current_tool)
+            and state.next_expected_action != "stop"
             and (
                 lowered in followup_markers
                 or lowered in retry_markers
@@ -230,6 +231,10 @@ class WorkflowRuntime:
                 source="workflow_runtime",
             )
         return hint
+
+    @staticmethod
+    def _is_operational_tool(tool_name: str) -> bool:
+        return tool_name.strip() not in {"", "chat", "clarify"}
 
     def _update_state_from_result(
         self,

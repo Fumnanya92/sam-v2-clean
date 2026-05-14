@@ -28,7 +28,7 @@ class RuntimeDecisionPolicy:
         recent_history: list[dict[str, object]],
     ) -> PolicyDecision:
         lowered = user_text.strip().lower()
-        if lowered in {"continue", "go on", "again", "yes"} and state.current_tool:
+        if lowered in {"continue", "go on", "again", "yes"} and _is_operational_tool(state.current_tool):
             return PolicyDecision("continue", "user_requested_continue")
         if lowered in {"stop", "cancel", "abort"}:
             return PolicyDecision("stop", "user_requested_stop")
@@ -44,11 +44,16 @@ class RuntimeDecisionPolicy:
             return PolicyDecision("clarify", "parser_requested_clarification")
         if lowered in {"retry", "try again"}:
             return PolicyDecision("retry", "user_requested_retry")
-        if hint.intent in {"chat", "clarify"} and state.current_tool and state.status in {"running", "awaiting_input"}:
+        if (
+            hint.intent in {"chat", "clarify"}
+            and _is_operational_tool(state.current_tool)
+            and state.status in {"running", "awaiting_input"}
+            and state.next_expected_action != "stop"
+        ):
             return PolicyDecision("continue", "stateful_followup")
         if recent_history:
             last = recent_history[-1]
-            if str(last.get("status", "")).lower() in {"failed", "partial"} and state.current_tool:
+            if str(last.get("status", "")).lower() in {"failed", "partial"} and _is_operational_tool(state.current_tool):
                 return PolicyDecision("retry", "prior_step_failed")
         return PolicyDecision("execute", "default_execute")
 
@@ -87,3 +92,7 @@ class RuntimeDecisionPolicy:
         # Prefer retry early in a sequence, then ask user.
         result.next_action = "retry" if state.turn_count < 2 or decision.action == "retry" else "ask_user"
         return result
+
+
+def _is_operational_tool(tool_name: str) -> bool:
+    return tool_name.strip() not in {"", "chat", "clarify"}
