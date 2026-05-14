@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from core.runtime import SamRuntime
+from core.goal_state import GoalState
+from core.request_model import IntentRequest
+from core.runtime_policy import RuntimeDecisionPolicy
 from llm import OllamaIntentOutput
 
 
@@ -78,6 +81,46 @@ def test_followup_overrides_chat_hint_using_goal_state() -> None:
         assert first.ok and second.ok
         assert second.metadata.get("parsed_intent_hint") == "chat"
         assert second.metadata.get("intent") == "list_tasks"
+
+
+def test_stopped_delegated_task_does_not_hijack_chat_followup() -> None:
+    decision = RuntimeDecisionPolicy().decide_pre_action(
+        user_text="sam I finally got you to do good",
+        hint=IntentRequest(intent="chat", raw_text="sam I finally got you to do good", confidence="high"),
+        state=GoalState(
+            active_work="autonomous_request",
+            current_tool="delegate_coding_task",
+            last_observation="Answer: May 2026 levy is due June 1, 2026.",
+            next_expected_action="stop",
+            workflow_stage="observing",
+            status="running",
+            turn_count=2,
+        ),
+        recent_history=[],
+    )
+    assert decision.action == "execute"
+
+
+def test_chat_followup_does_not_continue_chat_as_operational_work() -> None:
+    decision = RuntimeDecisionPolicy().decide_pre_action(
+        user_text="I finally got to do the coding you havent done is months",
+        hint=IntentRequest(
+            intent="chat",
+            raw_text="I finally got to do the coding you havent done is months",
+            confidence="high",
+        ),
+        state=GoalState(
+            active_work="chat",
+            current_tool="chat",
+            last_observation="Yes, I'm here! How can I help you?",
+            next_expected_action="ask_user",
+            workflow_stage="awaiting_user",
+            status="awaiting_input",
+            turn_count=1,
+        ),
+        recent_history=[],
+    )
+    assert decision.action == "execute"
 
 
 def test_runtime_events_stream_is_present() -> None:

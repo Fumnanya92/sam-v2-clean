@@ -142,16 +142,26 @@ class OllamaClient:
         
         # Check if a coding model (not local) is actively selected
         active_coding_model = ""
+        detected_intent = ""
         if isinstance(memory_block, dict):
             coding_model_info = memory_block.get("coding_model", {})
             if isinstance(coding_model_info, dict):
                 coding_model_value = coding_model_info.get("value", {})
                 if isinstance(coding_model_value, dict):
                     active_coding_model = str(coding_model_value.get("active_coding_model", "")).strip()
+            detected_intent_info = memory_block.get("detected_intent", "")
+            if isinstance(detected_intent_info, dict):
+                detected_intent_info = detected_intent_info.get("value", "")
+            detected_intent = str(detected_intent_info or "").strip()
         
         coding_model_instruction = ""
         if active_coding_model and active_coding_model not in {"local", ""}:
-            coding_model_instruction = f"ACTIVE CODING MODEL: {active_coding_model} is selected. For any task/goal requests that involve coding, analysis, or problem-solving (not pure conversation), route to 'autonomous_request' and let the coding model handle it. Do NOT ask clarification for these tasks - delegate them immediately.\n"
+            coding_model_instruction = (
+                f"ACTIVE CODING MODEL: {active_coding_model} is selected. "
+                "Route to autonomous_request only when the compact context detected_intent is coding, debugging, or review, "
+                "or when the user explicitly asks to implement, edit code/files, fix code, run tests, generate code, or review a repo. "
+                "Do not route normal conversation, planning, architecture discussion, or thinking aloud into coding automatically.\n"
+            )
         
         prompt = "\n".join(
             [
@@ -237,6 +247,7 @@ class OllamaClient:
                 f"Workspace root: {workspace_root}",
                 f"Known projects JSON: {projects_json}",
                 f"Memory context JSON: {memory_json}",
+                f"Compact detected intent: {detected_intent}",
                 recent_conversation,
                 f"User request: {user_text}",
                 'Return fields: intent, parameters, needs_clarification, clarification_question, response_text, confidence.',

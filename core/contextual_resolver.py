@@ -31,6 +31,25 @@ class ContextualRequestResolver:
         last_runtime_intent = str(daily_state.get("last_runtime_intent", {}).get("value", "") or daily_state.get("last_runtime_intent", "")).strip().lower()
         last_runtime_summary = str(daily_state.get("last_runtime_summary", {}).get("value", "") or daily_state.get("last_runtime_summary", "")).strip()
         pending_scaffold = _pending_scaffold(memory_block)
+        detected_intent = _detected_intent(memory_block)
+
+        if request.intent in {"autonomous_request", "delegate_coding_task"} and detected_intent in {
+            "casual_chat",
+            "planning",
+            "architecture",
+            "unclear",
+        } and not self._looks_like_task(text):
+            request.intent = "chat" if detected_intent != "unclear" else "clarify"
+            request.parameters = {}
+            request.needs_clarification = detected_intent == "unclear"
+            request.clarification_question = (
+                "Do you want to keep planning, or should I implement changes in the codebase?"
+                if detected_intent == "unclear"
+                else ""
+            )
+            request.response_text = request.response_text or ""
+            request.source = request.source or "context_intent_guard"
+            return request
         
         # Check if a coding model is active
         active_coding_model = ""
@@ -53,9 +72,9 @@ class ContextualRequestResolver:
                 request.source = "corrected_repo_context"
                 return request
 
-        # If a coding model (not local) is active and request is clarify/chat for a task, delegate to autonomous_request
+        # If a coding model (not local) is active, delegate only explicit coding/debug/review work.
         if active_coding_model and active_coding_model not in {"local", ""}:
-            if request.intent in {"clarify", "chat"} and self._looks_like_task(text):
+            if request.intent in {"clarify", "chat"} and detected_intent in {"coding", "debugging", "review"}:
                 request.intent = "autonomous_request"
                 request.parameters = {"query": text}
                 request.needs_clarification = False
@@ -292,6 +311,22 @@ def _pending_scaffold(memory_block: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(pending_scaffold_raw, dict) and "value" in pending_scaffold_raw:
         pending_scaffold_raw = pending_scaffold_raw.get("value", {})
     return pending_scaffold_raw if isinstance(pending_scaffold_raw, dict) else {}
+
+
+def _detected_intent(memory_block: dict[str, Any] | None) -> str:
+    if not isinstance(memory_block, dict):
+        return ""
+    raw = memory_block.get("detected_intent", "")
+    if isinstance(raw, dict) and "value" in raw:
+        raw = raw.get("value", "")
+    if isinstance(raw, str):
+        return raw.strip()
+    compact = memory_block.get("compact_context", {})
+    if isinstance(compact, dict) and "value" in compact:
+        compact = compact.get("value", {})
+    if isinstance(compact, dict):
+        return str(compact.get("intent", "")).strip()
+    return ""
 
 
 def _asks_about_known_projects(text: str) -> bool:

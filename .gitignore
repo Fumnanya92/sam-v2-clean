@@ -37,6 +37,7 @@ debug/
 .coverage
 .coverage.*
 .cache/
+.pytest-tmp/
 
 # OS
 .DS_Store
@@ -55,6 +56,7 @@ tmpclaude-*
 
 # Runtime / session data
 sam_session.log
+.cli-chat-test/
 memory/patterns.json
 memory/session_state.json
 memory/memory.json

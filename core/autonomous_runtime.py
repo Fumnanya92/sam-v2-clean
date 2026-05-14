@@ -250,8 +250,12 @@ class AutonomousRuntime:
                     memory_block=memory_block,
                     workspace_root=str(self.workspace_root),
                 )
-                # If LLM wants to finalize but fallback says read, use fallback
-                if str(llm_decision.get("action", "")).lower() == "final" and str(fallback_decision.get("action", "")).lower() == "tool":
+                # If LLM wants to finalize but fallback says an evidence read is still needed, use fallback.
+                if (
+                    str(llm_decision.get("action", "")).lower() == "final"
+                    and str(fallback_decision.get("action", "")).lower() == "tool"
+                    and "read" in str(fallback_decision.get("tool", "")).lower()
+                ):
                     return fallback_decision
                 return llm_decision
             except Exception as exc:
@@ -306,6 +310,9 @@ class AutonomousRuntime:
         requested_score = evidence_path_score(requested_path, matches, pattern_text) if requested_path else 0
         strongest_score = evidence_path_score(strongest_path, matches, pattern_text) if strongest_path else 0
         if requested_path and requested_score >= strongest_score and requested_score > 0:
+            requested_candidate = Path(requested_path)
+            if not requested_candidate.is_absolute() and str(metadata.get("root_path", "")).strip():
+                arguments["path"] = str(Path(str(metadata.get("root_path", "")).strip()) / requested_path)
             return None
         replacement_path = str(strongest.get("path", "")).strip()
         if not replacement_path:

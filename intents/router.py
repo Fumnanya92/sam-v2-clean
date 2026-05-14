@@ -123,6 +123,7 @@ class IntentRouter:
             tool_executor=self.tool_executor,
             task_planner=self.task_planner,
             observation_loop=self.observation_loop,
+            db_path=str(self.db_path),
         )
 
     def discover_projects(self) -> SamResult:

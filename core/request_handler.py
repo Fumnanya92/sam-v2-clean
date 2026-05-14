@@ -15,7 +15,17 @@ from diagnostics.run_logger import RunLogger
 from core.conversation_state import ConversationState
 from intents import IntentRouter
 from memory.manager import load_memory, update_memory
-from memory.long_term import learn, log_turn, snapshot as long_term_snapshot
+from memory.long_term import (
+    classify_intent,
+    consolidate_memories,
+    create_coding_review,
+    extract_candidate_memories,
+    learn,
+    log_turn,
+    save_memory_candidate,
+    snapshot as long_term_snapshot,
+    summarize_conversation_if_needed,
+)
 from memory.session import save_session_state
 from storage.db import log_audit_event
 from storage.models import AuditEvent
@@ -61,6 +71,7 @@ class RequestHandler:
             tool_executor=self.tool_executor,
             task_planner=self.task_planner,
             observation_loop=self.observation_loop,
+            db_path=str(self.db_path),
         )
         self.workflow_runtime = WorkflowRuntime()
 
@@ -131,6 +142,8 @@ class RequestHandler:
             scope=str(_memory.get("daily_state", {}).get("last_project_root_path", {}).get("value", "")),
         )
         _memory["long_term"] = {"value": long_term}
+        _memory["compact_context"] = {"value": long_term.get("compact_context", {})}
+        _memory["detected_intent"] = {"value": long_term.get("detected_intent", classify_intent(text))}
         coding_model = self.router.coding_model_status() if hasattr(self.router, "coding_model_status") else {}
         _memory["coding_model"] = {"value": coding_model}
 
@@ -158,6 +171,7 @@ class RequestHandler:
             user_text=text,
             result=result,
             long_term=long_term,
+            request_count=session.request_count + 1,
         )
         # Preserve router-produced conversation state; synthesize only when missing.
         conversation_state_updates = result.metadata.get("conversation_state")
@@ -182,6 +196,7 @@ class RequestHandler:
         daily_state_updates = {
             "last_runtime_request": text,
             "last_runtime_intent": result.metadata.get("intent", ""),
+            "last_detected_intent": long_term.get("detected_intent", ""),
             "last_runtime_status": result.status,
             "last_runtime_summary": result.summary,
         }
@@ -349,10 +364,11 @@ class RequestHandler:
         user_text: str,
         result: SamResult,
         long_term: dict[str, object],
+        request_count: int = 0,
     ) -> None:
         scope = str(result.metadata.get("root_path") or result.metadata.get("path") or "")
         action = str(result.metadata.get("intent", ""))
-        log_turn(
+        user_log = log_turn(
             self.db_path,
             session_id=session_id,
             role="user",
@@ -360,7 +376,7 @@ class RequestHandler:
             action=action,
             scope=scope,
         )
-        log_turn(
+        sam_log = log_turn(
             self.db_path,
             session_id=session_id,
             role="sam",
@@ -373,6 +389,45 @@ class RequestHandler:
                 "autonomous_steps": result.metadata.get("autonomous_steps", 0),
             },
         )
+        source_conversation_id = str(
+            sam_log.metadata.get("conversation_id")
+            or user_log.metadata.get("conversation_id")
+            or ""
+        )
+        related_project_id = str(
+            result.metadata.get("project_id")
+            or result.metadata.get("root_path")
+            or result.metadata.get("path")
+            or ""
+        )
+        detected_intent = classify_intent(user_text)
+        for candidate in extract_candidate_memories(
+            source_conversation_id=source_conversation_id,
+            source_session_id=session_id,
+            user_text=user_text,
+            assistant_text=result.summary,
+            intent=detected_intent if detected_intent != "unclear" else action,
+            related_project_id=related_project_id,
+        ):
+            save_memory_candidate(self.db_path, candidate)
+
+        if detected_intent in {"coding", "debugging", "review"} or action in {"autonomous_request", "delegate_coding_task"}:
+            create_coding_review(
+                self.db_path,
+                session_id=session_id,
+                related_project_id=related_project_id,
+                source_conversation_id=source_conversation_id,
+                planned_requirements=user_text if detected_intent in {"coding", "debugging"} else "",
+                implementation_status="completed" if result.ok else "blocked",
+                missing_items="" if result.ok else (result.error_message or result.summary),
+                test_status=str(result.metadata.get("test_status", "")),
+                review_notes=result.summary,
+            )
+
+        summarize_conversation_if_needed(self.db_path, session_id=session_id)
+        if request_count and request_count % 10 == 0:
+            consolidate_memories(self.db_path)
+
         if result.ok:
             learn(
                 self.db_path,
