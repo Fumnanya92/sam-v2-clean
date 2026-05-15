@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from approvals import ApprovalManager, AuthorityEngine
 from capabilities import CapabilityRegistry
@@ -30,8 +31,10 @@ from memory.session import save_session_state
 from storage.db import log_audit_event
 from storage.models import AuditEvent
 
+from .action_gate import ActionGate, ActionGateDecision
 from .goal_state import GoalState
 from .execution_engine import RuntimeExecutionEngine
+from .request_model import IntentRequest
 from .session import RuntimeSession
 from .workflow_runtime import WorkflowRuntime
 
@@ -74,6 +77,8 @@ class RequestHandler:
             db_path=str(self.db_path),
         )
         self.workflow_runtime = WorkflowRuntime()
+        # Initialize action gate with router's model client for LLM judgment
+        self.action_gate = ActionGate(model_client=self.router.model_client if hasattr(self.router, "model_client") else None)
 
     def handle(self, user_text: str, session: RuntimeSession) -> SamResult:
         run_logger = RunLogger("sam_v2 core request")
@@ -147,7 +152,62 @@ class RequestHandler:
         coding_model = self.router.coding_model_status() if hasattr(self.router, "coding_model_status") else {}
         _memory["coding_model"] = {"value": coding_model}
 
+        # ACTION GATE: Check if user is clearly requesting external action
+        # Prepare parameters for action gate's classify_request call
+        try:
+            capabilities = [cap.get("name", "") for cap in (self.router.registry.list() if hasattr(self.router, "registry") and hasattr(self.router.registry, "list") else [])]
+        except Exception:
+            capabilities = []
+        
+        try:
+            known_projects = self.router.project_registry.list() if hasattr(self.router, "project_registry") and hasattr(self.router.project_registry, "list") else []
+        except Exception:
+            known_projects = []
+        
+        workspace_root = str(self.router.workspace_root) if hasattr(self.router, "workspace_root") else ""
+        
+        action_gate_decision = self.action_gate.decide(
+            user_text=text,
+            memory_block=_memory,
+            capabilities=capabilities,
+            known_projects=known_projects,
+            workspace_root=workspace_root,
+        )
+        run_logger.log("action_gate_decided", action_gate_decision.to_dict())
+        
+        # If action gate says no external action, respond conversationally only
+        if not action_gate_decision.should_act:
+            result = self._conversational_response_only(
+                user_text=text,
+                session=session,
+                memory_block=_memory,
+                action_gate_decision=action_gate_decision,
+            )
+            self._record_long_term_turns(
+                session_id=session.session_id,
+                user_text=text,
+                result=result,
+                long_term=long_term,
+                request_count=session.request_count + 1,
+            )
+            conversation_state_updates = result.metadata.get("conversation_state")
+            if not isinstance(conversation_state_updates, dict):
+                prior_state = ConversationState.from_memory(_memory)
+                conversation_state_updates = self.conversation_state.writeback(result, prior_state)
+            session.record(text, result)
+            run_logger.log("request_handled_conversational", {"action_gate": action_gate_decision.to_dict()})
+            action_logger.log("conversational_response", status="success", data=action_gate_decision.to_dict())
+            self._save_session_state(session, run_logger)
+            summary_logger.write(result, metadata={"action_gate": action_gate_decision.to_dict()})
+            return result
+
         parsed_hint = self.request_parser.parse(text, _memory)
+        parsed_hint = self._promote_action_gate_approved_hint(
+            parsed_hint=parsed_hint,
+            user_text=text,
+            memory_block=_memory,
+            action_gate_decision=action_gate_decision,
+        )
         result = ensure_trace(
             self.workflow_runtime.run_turn(
                 user_text=text,
@@ -166,6 +226,8 @@ class RequestHandler:
                 ),
             )
         )
+        # Add action gate result to metadata
+        result.metadata.setdefault("action_gate", action_gate_decision.to_dict())
         self._record_long_term_turns(
             session_id=session.session_id,
             user_text=text,
@@ -446,6 +508,119 @@ class RequestHandler:
                 scope=scope,
                 metadata={"source": "request_handler", "long_term_snapshot": bool(long_term)},
             )
+
+    def _conversational_response_only(
+        self,
+        user_text: str,
+        session: RuntimeSession,
+        memory_block: dict[str, Any],
+        action_gate_decision: ActionGateDecision,
+    ) -> SamResult:
+        """Generate a conversational-only response when action gate declines execution.
+        
+        Uses memory and context to provide intelligent, contextual responses
+        without triggering execution pipelines.
+        """
+        # Extract useful context from memory
+        detected_intent = memory_block.get("detected_intent", {}).get("value", "")
+        summary = self._generate_conversational_response(
+            user_text=user_text,
+            memory_block=memory_block,
+            action_gate_reason=action_gate_decision.reason,
+        )
+        
+        result = SamResult(
+            status="success",
+            summary=summary,
+            next_action="stop",
+            metadata={
+                "action_gate": action_gate_decision.to_dict(),
+                "execution_mode": "conversational_only",
+                "intent": "chat",
+                "source": "action_gate_conversational",
+                "detected_intent": detected_intent,
+            },
+        )
+        
+        return result
+
+    def _promote_action_gate_approved_hint(
+        self,
+        *,
+        parsed_hint: IntentRequest,
+        user_text: str,
+        memory_block: dict[str, Any],
+        action_gate_decision: ActionGateDecision,
+    ) -> IntentRequest:
+        """Let the action gate rescue weak parser hints after action is approved.
+
+        This method does not decide whether Sam may execute. It only runs after
+        the centralized action gate has already approved external action.
+        """
+        if not action_gate_decision.should_act:
+            return parsed_hint
+        if action_gate_decision.action_type in {"none", "other"}:
+            return parsed_hint
+        if parsed_hint.intent not in {"chat", "clarify"}:
+            return parsed_hint
+
+        goal_state = GoalState.from_memory(memory_block)
+        prior_objective = goal_state.current_objective.strip()
+        prior_observation = goal_state.last_observation.strip()
+        objective_parts = []
+        if prior_objective:
+            objective_parts.append(f"Prior objective: {prior_objective}")
+        if prior_observation:
+            objective_parts.append(f"Prior result or question: {prior_observation}")
+        objective_parts.append(f"Current user request: {user_text.strip()}")
+        objective = "\n\n".join(objective_parts)
+
+        parameters = dict(parsed_hint.parameters) if isinstance(parsed_hint.parameters, dict) else {}
+        parameters.setdefault("objective", objective)
+        parameters.setdefault("query", objective)
+        parameters["_action_gate_promoted"] = action_gate_decision.to_dict()
+
+        parsed_hint.intent = "autonomous_request"
+        parsed_hint.parameters = parameters
+        parsed_hint.needs_clarification = False
+        parsed_hint.clarification_question = ""
+        parsed_hint.response_text = ""
+        parsed_hint.source = "action_gate_promoted"
+        return parsed_hint
+    
+    def _generate_conversational_response(
+        self,
+        user_text: str,
+        memory_block: dict[str, Any],
+        action_gate_reason: str,
+    ) -> str:
+        """Generate conversational response using the configured LLM client."""
+        model_client = self.router.model_client if hasattr(self.router, "model_client") else None
+        if model_client is None:
+            return (
+                "I could not reach the local language model for a conversational reply. "
+                "Please make sure Ollama is running, then try again."
+            )
+
+        try:
+            summary = model_client.generate_conversational_response(
+                user_text,
+                memory_block=memory_block,
+                action_gate_reason=action_gate_reason,
+            )
+        except Exception as exc:
+            return (
+                "I could not get a conversational reply from the local language model "
+                f"({type(exc).__name__}). Please make sure Ollama is running, then try again."
+            )
+
+        if summary.strip():
+            return summary.strip()
+
+        return (
+            "The local language model returned an empty conversational reply. "
+            "Please try again."
+        )
 
     def _save_session_state(self, session: RuntimeSession, run_logger: RunLogger) -> SamResult:
         save_result = save_session_state(self.session_path, session.to_state())

@@ -1,4 +1,14 @@
-"""Primary runtime execution engine (planner -> tool -> observe)."""
+"""Primary runtime execution engine (planner -> tool -> observe).
+
+NOTE: All execution through this engine only happens after action_gate
+has approved the request (should_act=true). Therefore, keyword-based
+helper functions like _requires_project_context() and _is_mutating_request()
+are safe to use for planning purposes - they cannot accidentally trigger
+execution from conversational input.
+
+The action_gate (core/action_gate.py) is the single authority that
+determines whether external action is requested before this engine runs.
+"""
 
 from __future__ import annotations
 
@@ -281,9 +291,9 @@ class RuntimeExecutionEngine:
         text = request.raw_text or str(request.parameters.get("goal", "") if isinstance(request.parameters, dict) else "") or request.intent
         project_id = _project_id_from_request(request, memory_block)
         missing = []
-        if request.intent in {"delegate_coding_task"} and not project_id and _requires_project_context(text):
+        if request.intent in {"delegate_coding_task"} and not project_id and _requires_project_context(text, request.intent):
             missing.append("Which project or repository should I use?")
-        if request.intent == "autonomous_request" and not project_id and _is_mutating_request(text) and _requires_project_context(text):
+        if request.intent == "autonomous_request" and not project_id and _is_mutating_request(text, request.intent) and _requires_project_context(text, request.intent):
             missing.append("Which project or repository should I use?")
         checklist = _implementation_checklist(text, request.intent)
         return {
@@ -380,9 +390,11 @@ class RuntimeExecutionEngine:
 
     @staticmethod
     def _should_use_pipeline(request: IntentRequest) -> bool:
+        # Conversational and info requests never use pipeline
         if request.intent in {"chat", "clarify", "capabilities", "list_tasks", "list_projects", "show_coding_model", "set_coding_model"}:
             return False
-        text = (request.raw_text or "").lower()
+        
+        # Operational intents always use pipeline (action_gate has already approved)
         operational_intents = {
             "autonomous_request",
             "delegate_coding_task",
@@ -401,7 +413,9 @@ class RuntimeExecutionEngine:
         }
         if request.intent in operational_intents:
             return True
-        return any(token in text for token in ("implement", "fix", "debug", "run test", "edit file", "open browser", "open folder"))
+        
+        # No keyword-based pipeline triggering; action_gate is the authority
+        return False
 
 
 def _task_id(text: str) -> str:
@@ -431,12 +445,28 @@ def _project_id_from_request(request: IntentRequest, memory_block: dict[str, Any
     return ""
 
 
-def _requires_project_context(text: str) -> bool:
+def _requires_project_context(text: str, intent: str | None = None) -> bool:
+    """Decide if the request needs a project context.
+
+    Prefer explicit intent signals over token scanning. If an intent is provided
+    and represents an operational request, return True. Otherwise fall back to
+    a lightweight token check.
+    """
+    operational_like_intents = {"delegate_coding_task", "autonomous_request", "scaffold_project", "inspect_project_repo", "inspect_repo"}
+    if intent and intent in operational_like_intents:
+        return True
     lowered = text.lower()
     return any(token in lowered for token in ("project", "repo", "codebase", "app"))
 
 
-def _is_mutating_request(text: str) -> bool:
+def _is_mutating_request(text: str, intent: str | None = None) -> bool:
+    """Detect if a request is mutating (code change) based primarily on intent.
+
+    Uses intent when available; falls back to token scanning of the text.
+    """
+    mutating_intents = {"delegate_coding_task", "scaffold_project", "autonomous_request", "create_task", "update_task"}
+    if intent and intent in mutating_intents:
+        return True
     lowered = text.lower()
     return any(token in lowered for token in ("implement", "fix", "edit", "modify", "write", "build", "create", "delete", "scaffold"))
 

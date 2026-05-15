@@ -270,6 +270,163 @@ class OllamaClient:
             model=model,
         )
 
+    def decide_action_gate(
+        self,
+        user_text: str,
+        *,
+        memory_block: dict[str, Any] | None = None,
+        capabilities: list[str] | None = None,
+        known_projects: list[dict[str, str]] | None = None,
+        workspace_root: str = "",
+    ) -> dict[str, Any]:
+        """LLM judgment for whether Sam should take external action now."""
+        model = self.resolve_model()
+        prompt = "\n".join(
+            [
+                "You are Sam's centralized Action Gate.",
+                "Return JSON only. Do not include markdown fences.",
+                "Answer one question: should Sam take external action now, or only reply conversationally?",
+                "",
+                "External action includes calling Codex, delegating to a coding model, running planner/executor/reviewer, editing files, inspecting a repo, reading files, querying Firebase/Firestore, setting environment variables, running commands/tests, opening a browser/desktop, deploying, pushing git changes, or using tools.",
+                "",
+                "Default to should_act=false. If uncertain, return should_act=false.",
+                "Mentioning technical words is not enough.",
+                "Only return should_act=true when the user is clearly instructing Sam to do something now.",
+                "The user may discuss coding, testing, fixing, bugs, files, browser automation, repositories, implementation, Codex, Firebase, Firestore, SDK keys, or service-account files without asking for action.",
+                "",
+                "Important distinction:",
+                "- 'When I say go fix it, then you should use Codex' is conversation about future behavior, so should_act=false.",
+                "- 'Give this to Codex to check resident docs at C:\\path\\key.json' is a current instruction to use Codex/tools, so should_act=true.",
+                "- 'Use this SDK key path so Codex can query Firestore now' is a current instruction, so should_act=true.",
+                "",
+                "Examples where should_act=false:",
+                "- I will test you when I am done.",
+                "- We need to test this later.",
+                "- I am still fixing you.",
+                "- The button may need fixing.",
+                "- I want browser automation later.",
+                "- When I say go fix it, then you should use Codex.",
+                "- We should add memory before coding.",
+                "- I'm talking about the code, not asking you to code.",
+                "- Sam should know when to code.",
+                "- I don't want you to call Codex in the middle of conversation.",
+                "",
+                "Examples where should_act=true:",
+                "- Go run the tests now.",
+                "- Use Codex to fix the login button.",
+                "- Open the repo and inspect app.py.",
+                "- Create a new file called memory_debug.py.",
+                "- Deploy this now.",
+                "- Push the changes to git.",
+                "- Check the repo and tell me why the button is broken.",
+                "- Give this to Codex to check resident docs using C:\\Users\\me\\key.json.",
+                "- Set env so Codex can query Firestore and tell me the April levy.",
+                "",
+                "Choose action_type from: none, read_only, code_change, test_run, browser, desktop, deploy, git, other.",
+                "Use read_only for inspection/querying data/files without code edits.",
+                "Use code_change for Codex handoff when code changes may be needed.",
+                "Use other only for explicit runtime controls or actions that do not fit another type.",
+                'JSON shape: {"should_act": true|false, "action_type": "none|read_only|code_change|test_run|browser|desktop|deploy|git|other", "reason": "...", "confidence": 0.0}',
+                f"Available capabilities: {', '.join(capabilities or [])}",
+                f"Workspace root: {workspace_root}",
+                f"Known projects JSON: {json.dumps(known_projects or [], ensure_ascii=True)[:4000]}",
+                f"Memory JSON: {json.dumps(memory_block or {}, ensure_ascii=True)[:6000]}",
+                f"User message: {user_text}",
+            ]
+        )
+        payload = {"model": model, "prompt": prompt, "stream": False, "format": "json"}
+        response = self._request("POST", "/api/generate", payload)
+        raw_body = str(response.get("response", "")).strip()
+        parsed = self._parse_json_object(raw_body)
+        if not isinstance(parsed, dict):
+            raise ValueError("Ollama action-gate response was not valid JSON.")
+        return parsed
+
+    def generate_conversational_response(
+        self,
+        user_text: str,
+        *,
+        memory_block: dict[str, Any] | None = None,
+        action_gate_reason: str = "",
+    ) -> str:
+        """Generate Sam's normal conversational reply through the local LLM."""
+        model = self.resolve_model()
+        prompt = self._build_conversational_prompt(
+            user_text=user_text,
+            memory_block=memory_block,
+            action_gate_reason=action_gate_reason,
+        )
+        payload = {"model": model, "prompt": prompt, "stream": False}
+        response = self._request("POST", "/api/generate", payload)
+        response_text = str(response.get("response", "") or "").strip()
+        return self._clean_assistant_prefix(response_text)
+
+    def _build_conversational_prompt(
+        self,
+        *,
+        user_text: str,
+        memory_block: dict[str, Any] | None,
+        action_gate_reason: str,
+    ) -> str:
+        context_lines: list[str] = []
+
+        if isinstance(memory_block, dict):
+            last_project = memory_block.get("daily_state", {}).get("last_project_name", {}).get("value")
+            if last_project:
+                context_lines.append(f"- Current project context: {last_project}")
+
+            detected_intent = memory_block.get("detected_intent", {})
+            if isinstance(detected_intent, dict):
+                detected_intent = detected_intent.get("value", "")
+            if detected_intent:
+                context_lines.append(f"- Conversation label for context only: {detected_intent}")
+
+            long_term = memory_block.get("long_term", {})
+            if isinstance(long_term, dict):
+                long_term_value = long_term.get("value", {})
+                if isinstance(long_term_value, dict):
+                    facts = long_term_value.get("relevant_facts", [])[:4]
+                    lessons = long_term_value.get("relevant_lessons", [])[:3]
+                    if facts:
+                        context_lines.append(f"- Relevant remembered facts: {json.dumps(facts, ensure_ascii=True)}")
+                    if lessons:
+                        context_lines.append(f"- Relevant remembered lessons: {json.dumps(lessons, ensure_ascii=True)}")
+
+                    recent_turns = []
+                    conversation_items = long_term_value.get("recent_conversation", [])
+                    if isinstance(conversation_items, list):
+                        for item in conversation_items[-8:]:
+                            if isinstance(item, dict):
+                                role = str(item.get("role", "unknown")).strip() or "unknown"
+                                message = str(item.get("message", "")).strip()
+                                if message:
+                                    recent_turns.append(f"{role.capitalize()}: {message}")
+                    if recent_turns:
+                        context_lines.append("Recent conversation:\n" + "\n".join(recent_turns))
+
+        if action_gate_reason:
+            context_lines.append(f"- Action gate result: no external action now. Reason: {action_gate_reason}")
+
+        context = "\n".join(context_lines) if context_lines else "No special context."
+
+        return "\n".join(
+            [
+                "You are Sam, the user's conversational AI assistant.",
+                "Respond naturally to the user's latest message.",
+                "The action gate has decided this turn is conversational only, so do not claim you ran tools, inspected files, called Codex, edited code, opened a browser, or executed commands.",
+                "The user may mention coding, testing, fixing, repositories, browser automation, or implementation as part of normal conversation.",
+                "Do not treat those mentions as requests to act unless the action gate has approved action, which it has not for this prompt.",
+                "Keep the reply concise and human. Match the user's tone.",
+                "Do not return JSON. Do not prefix with 'Sam:' or 'Assistant:'.",
+                "",
+                "Context:",
+                context,
+                "",
+                f"User: {user_text}",
+                "Sam:",
+            ]
+        )
+
     def generate_project(self, *, project_name: str, project_type: str, user_request: str) -> GeneratedProject:
         model = self.resolve_model()
         prompt = "\n".join(
@@ -466,6 +623,14 @@ class OllamaClient:
                 return json.loads(cleaned[start:end])
             except json.JSONDecodeError:
                 return None
+
+    @staticmethod
+    def _clean_assistant_prefix(text: str) -> str:
+        cleaned = text.strip()
+        for prefix in ("Assistant:", "Sam:"):
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+        return cleaned
 
     @staticmethod
     def _string_list(value: Any) -> list[str]:

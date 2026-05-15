@@ -283,7 +283,7 @@ class NativeShellController:
         for key in ("root_path", "repo_root", "path"):
             if r.metadata.get(key):
                 out.append(f"{key.replace('_', ' ').title()}: {r.metadata[key]}")
-        if r.metadata.get("stdout"):
+        if r.metadata.get("stdout") and not r.metadata.get("coding_answer"):
             lines = str(r.metadata["stdout"]).strip().splitlines()
             if lines:
                 out.append(f"Output: {lines[-1]}")

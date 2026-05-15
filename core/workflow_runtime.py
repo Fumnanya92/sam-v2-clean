@@ -230,6 +230,42 @@ class WorkflowRuntime:
                 clarification_question="",
                 source="workflow_runtime",
             )
+        if (
+            hint.intent in {"chat", "clarify"}
+            and state.workflow_stage == "awaiting_user"
+            and state.current_objective.strip()
+            and state.last_observation.strip()
+            and policy_decision.action == "execute"
+        ):
+            combined_objective = (
+                f"{state.current_objective.strip()}\n\n"
+                f"User clarification: {user_text.strip()}"
+            )
+            events.append(
+                trace_step(
+                    "Intent hint overridden",
+                    status="info",
+                    action="autonomous_request",
+                    reason="answering prior clarification with action-gate-approved context",
+                )
+            )
+            parameters = dict(hint.parameters) if isinstance(hint.parameters, dict) else {}
+            parameters.setdefault("objective", combined_objective)
+            parameters.setdefault("query", combined_objective)
+            parameters["_clarification_followup"] = {
+                "previous_objective": state.current_objective.strip(),
+                "previous_question": state.last_observation.strip(),
+                "answer": user_text.strip(),
+            }
+            return replace(
+                hint,
+                intent="autonomous_request",
+                parameters=parameters,
+                needs_clarification=False,
+                clarification_question="",
+                response_text="",
+                source="workflow_runtime",
+            )
         return hint
 
     @staticmethod

@@ -163,6 +163,7 @@ class CodingModelProvider:
             "root_path": str(root),
             "command": command,
             "stdout": "\n".join(output_lines[-120:]),
+            "coding_answer": summary,
             "changed_files": changed,
             "diff_changed": before != after,
             "duration_seconds": int(time.time() - started),
@@ -362,44 +363,41 @@ def _run_git(root: Path, command: Iterable[str]) -> str:
 
 
 def _coding_answer_summary(lines: list[str]) -> str:
+    """Return Codex/Claude's answer text, preserving its wording and lines."""
     answer = _extract_answer_block(lines)
     if answer:
-        return answer[:2000]
-    for line in reversed(lines):
-        stripped = line.strip()
-        if stripped and not _is_status_line(stripped):
-            return stripped[:1000]
+        return answer
     return ""
 
 
 def _extract_answer_block(lines: list[str]) -> str:
     cleaned = [_strip_terminal_line(line) for line in lines]
-    starts = [
+    answer_starts = [
         index
         for index, line in enumerate(cleaned)
-        if line.lower().startswith(("answer:", "final answer:", "result:"))
+        if line.lower().startswith(("answer:", "final answer:"))
     ]
-    if not starts:
-        starts = [
-            index
-            for index, line in enumerate(cleaned)
-            if line and not _is_status_line(line) and not _looks_like_tool_noise(line)
-        ]
-    for start in reversed(starts):
+    fallback_starts = [
+        index
+        for index, line in enumerate(cleaned)
+        if (
+            line
+            and not line.lower().startswith("result:")
+            and not _is_status_line(line)
+            and not _looks_like_tool_noise(line)
+        )
+    ]
+    starts = answer_starts or fallback_starts
+    ordered_starts = list(reversed(starts)) if answer_starts else starts
+    for start in ordered_starts:
         block: list[str] = []
         for line in cleaned[start:]:
             if not line:
-                if block:
-                    break
                 continue
-            if block and _is_section_after_answer(line):
-                break
-            if _looks_like_tool_noise(line):
-                if block:
-                    break
+            if _is_status_line(line) or _looks_like_tool_noise(line):
                 continue
             block.append(line)
-        text = " ".join(block).strip()
+        text = "\n".join(block).strip()
         if text and not _is_status_line(text):
             return text
     return ""
@@ -407,6 +405,8 @@ def _extract_answer_block(lines: list[str]) -> str:
 
 def _strip_terminal_line(line: str) -> str:
     stripped = line.strip()
+    if stripped.startswith("[Forge]"):
+        stripped = stripped[len("[Forge]"):].strip()
     if stripped.lower() in {"codex", "claude"}:
         return ""
     return stripped
@@ -429,10 +429,9 @@ def _is_status_line(line: str) -> bool:
     lowered = line.lower().strip()
     return (
         lowered in {"finished.", "done.", "completed."}
-        or lowered.startswith("verification run:")
         or lowered.startswith("files changed:")
         or lowered.startswith("tool succeeded:")
-        or lowered.startswith("result: verification run:")
+        or lowered.startswith("result:")
     )
 
 
@@ -442,6 +441,8 @@ def _looks_like_tool_noise(line: str) -> bool:
         lowered.startswith(("exec ", "wall time:", "exit code:", "output:", "error:", "warning:"))
         or " codex_core::" in lowered
         or " openai codex " in lowered
+        or lowered.startswith("openai codex v")
         or lowered.startswith(("workdir:", "model:", "provider:", "approval:", "sandbox:", "session id:"))
-        or lowered in {"--------", "user"}
+        or lowered in {"--------", "user", "codex", "claude"}
+        or ("\\build\\app\\intermediates\\" in lowered and lowered.endswith("..."))
     )

@@ -5,9 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from core.runtime import SamRuntime
+from core.action_gate import ActionGateDecision
 from core.goal_state import GoalState
 from core.request_model import IntentRequest
 from core.runtime_policy import RuntimeDecisionPolicy
+from core.workflow_runtime import WorkflowRuntime
+from diagnostics.result import SamResult
+from coding_models.manager import _coding_answer_summary
 from llm import OllamaIntentOutput
 
 
@@ -121,6 +125,159 @@ def test_chat_followup_does_not_continue_chat_as_operational_work() -> None:
         recent_history=[],
     )
     assert decision.action == "execute"
+
+
+def test_clarification_answer_rehydrates_prior_operational_objective() -> None:
+    runtime = WorkflowRuntime()
+    memory_block = {
+        "goal_state": {
+            "value": GoalState(
+                current_objective=(
+                    "give this to codex to check residents docs to "
+                    "C:\\Users\\DELL.COM\\Documents\\gatepass-key.json so that we accurately know"
+                ),
+                active_work="clarify",
+                current_tool="clarify",
+                last_observation=(
+                    "Could you clarify what you would like me to do with the JSON file?"
+                ),
+                next_expected_action="ask_user",
+                workflow_stage="awaiting_user",
+                status="awaiting_input",
+                turn_count=1,
+            ).to_memory()
+        }
+    }
+    captured: dict[str, IntentRequest] = {}
+
+    def _execute(request: IntentRequest) -> SamResult:
+        captured["request"] = request
+        return SamResult(
+            status="success",
+            summary="continued",
+            next_action="stop",
+            metadata={"intent": request.intent},
+        )
+
+    result = runtime.run_turn(
+        user_text=(
+            "Thats the path to my firestore key. Set env so Codex can query the "
+            "resident doc directly to tell me what April levies actually is"
+        ),
+        parsed_hint=IntentRequest(intent="chat", raw_text="clarification answer", confidence="high"),
+        memory_block=memory_block,
+        execute=_execute,
+    )
+
+    request = captured["request"]
+    assert result.ok
+    assert request.intent == "autonomous_request"
+    assert "give this to codex" in request.parameters["objective"]
+    assert "User clarification:" in request.parameters["objective"]
+    assert request.parameters["_clarification_followup"]["previous_question"].startswith("Could you clarify")
+
+
+def test_action_gate_approved_codex_key_request_rescues_weak_clarify_hint() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        runtime = SamRuntime(
+            db_path=root / "sam.db",
+            memory_path=root / "memory.json",
+            session_path=root / "session.json",
+            workspace_root=root / "workspace",
+        )
+        memory_block = {
+            "goal_state": {
+                "value": GoalState(
+                    current_objective="Find the actual April levy in the estate app.",
+                    last_observation="The repo fallback suggests 1500 but needs Firestore verification.",
+                    workflow_stage="observing",
+                    status="running",
+                ).to_memory()
+            }
+        }
+
+        promoted = runtime.handler._promote_action_gate_approved_hint(
+            parsed_hint=IntentRequest(
+                intent="clarify",
+                raw_text=(
+                    "give this to codex to check residents docs to "
+                    "C:\\Users\\DELL.COM\\Documents\\gatepass-key.json so that we accurately know"
+                ),
+                needs_clarification=True,
+                clarification_question="What should I do with the JSON file?",
+                confidence="medium",
+                source="test",
+            ),
+            user_text=(
+                "give this to codex to check residents docs to "
+                "C:\\Users\\DELL.COM\\Documents\\gatepass-key.json so that we accurately know"
+            ),
+            memory_block=memory_block,
+            action_gate_decision=ActionGateDecision(
+                should_act=True,
+                action_type="code_change",
+                reason="User clearly asked Codex to use the provided Firestore key path.",
+                confidence=0.9,
+            ),
+        )
+
+        assert promoted.intent == "autonomous_request"
+        assert promoted.needs_clarification is False
+        assert "actual April levy" in promoted.parameters["objective"]
+        assert "gatepass-key.json" in promoted.parameters["objective"]
+        assert promoted.parameters["_action_gate_promoted"]["should_act"] is True
+
+
+def test_coding_answer_summary_prefers_answer_over_later_status_result() -> None:
+    summary = _coding_answer_summary(
+        [
+            "[Forge] codex",
+            "[Forge] April 2026 was set to **₦1,000 per resident** in the available local Firestore ledger export.",
+            "[Forge] From `temp/resident_payment_monthly_2026-05-05T14-16-26-050Z.csv`:",
+            "[Forge] - April rows: `363`",
+            "[Forge] - Unique residents: `363`",
+            "[Forge] - Amount distribution: `₦1,000 x 363`",
+            "[Forge] - Total April levy: `₦363,000`",
+            "[Forge] - Status: `360 unpaid`, `3 paid`",
+            "[Forge] Inspected:",
+            "[Forge] - `functions/src/tools/export_payment_ledger.ts`",
+            "[Forge] Files changed: none.",
+            "[Forge] Verification run:",
+            "[Forge] - Aggregated the local May 5 payment ledger export successfully.",
+            "[Forge] Result: - Aggregated the local May 5 payment ledger export successfully.",
+            "[Forge] Tool succeeded: - Aggregated the local May 5 payment ledger export successfully.",
+            "[Forge] finished.",
+        ]
+    )
+
+    assert "₦1,000 per resident" in summary
+    assert "April rows: `363`" in summary
+    assert "Verification run:" in summary
+    assert "Aggregated the local May 5" in summary
+    assert "Tool succeeded" not in summary
+    assert "Result:" not in summary
+    assert "OpenAI Codex" not in summary
+
+
+def test_coding_answer_summary_ignores_codex_banner_and_path_noise() -> None:
+    summary = _coding_answer_summary(
+        [
+            "OpenAI Codex v0.130.0",
+            r"C:\Users\DELL.COM\Desktop\Darey\Estate\build\app\intermediates\merged_res_blame_folder\release\mergeReleaseResources...",
+            r"C:\Users\DELL.COM\Desktop\Darey\Estate\build\app\intermediates\merged_res_blame_folder\release\mergeReleaseResources...",
+            "Verification run: parsed the JSON with Node and aggregated `monthlyDue`.",
+            "April amount: ₦1,000 per resident.",
+            "Result: OpenAI Codex v0.130.0",
+            "Tool succeeded: OpenAI Codex v0.130.0",
+            "finished.",
+        ]
+    )
+
+    assert summary == (
+        "Verification run: parsed the JSON with Node and aggregated `monthlyDue`.\n"
+        "April amount: ₦1,000 per resident."
+    )
 
 
 def test_runtime_events_stream_is_present() -> None:
