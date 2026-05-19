@@ -25,8 +25,6 @@ INTENT_TYPES = {
     "coding",
     "debugging",
     "review",
-    "browser_task",
-    "desktop_task",
     "unclear",
 }
 
@@ -514,10 +512,6 @@ def classify_intent(user_text: str) -> str:
 
     if any(phrase in text for phrase in ("remember that", "remember this", "don't forget", "forget that", "update memory")):
         return "memory_update"
-    if any(phrase in text for phrase in ("open browser", "go to http", "visit http", "click ", "screenshot")):
-        return "browser_task"
-    if any(phrase in text for phrase in ("open vscode", "open vs code", "open folder", "open file", "desktop")):
-        return "desktop_task"
     if any(phrase in text for phrase in ("review this", "code review", "review my", "audit the implementation")):
         return "review"
     if any(phrase in text for phrase in ("debug", "failing test", "trace the bug", "fix the bug", "why is this failing")):

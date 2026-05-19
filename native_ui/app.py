@@ -291,8 +291,10 @@ class NativeShellController:
             out.append(f"Error: {r.error_message}")
         return out
 
-    def _format_reply(self, r: SamResult) -> str:
+    def _format_reply(self, r: SamResult) -> str:  # noqa: PLR0912
         intent = str(r.metadata.get("intent", "chat"))
+
+        # ── capabilities list ─────────────────────────────────────────────────
         if intent == "capabilities":
             caps    = r.metadata.get("available_capabilities", [])
             missing = r.metadata.get("missing_capabilities", [])
@@ -303,6 +305,7 @@ class NativeShellController:
                 lines += [f"- {m.replace('_',' ')}" for m in missing[:5]]
             return "\n".join(lines)
 
+        # ── directory listing ─────────────────────────────────────────────────
         if intent == "list_directory":
             entries = r.metadata.get("entries", [])
             count = r.metadata.get("entry_count", len(entries) if isinstance(entries, list) else 0)
@@ -317,6 +320,7 @@ class NativeShellController:
                 lines.append("(empty)")
             return "\n".join(lines)
 
+        # ── project discovery ─────────────────────────────────────────────────
         if intent == "discovery_workflow":
             lines = [r.summary]
             trace = r.metadata.get("execution_trace", [])
@@ -329,6 +333,36 @@ class NativeShellController:
                 lines += [f"{index}. {Path(str(item)).name}" for index, item in enumerate(candidates[:20], start=1)]
             return "\n".join(lines)
 
+        # ── coding delegation — the main answer path ──────────────────────────
+        if intent == "delegate_coding_task" or r.metadata.get("coding_model"):
+            answer = str(r.metadata.get("coding_answer", "") or r.summary).strip()
+            model  = str(r.metadata.get("coding_model", "agent")).strip()
+            lines: list[str] = []
+
+            if not r.ok:
+                lines.append(f"The {model} agent ran into a problem:")
+                lines.append(answer or r.error_message or "No details returned.")
+                return "\n".join(lines)
+
+            lines.append(answer)
+
+            changed = r.metadata.get("changed_files", [])
+            if isinstance(changed, list) and changed:
+                lines += ["", f"Files touched ({len(changed)}):"]
+                lines += [f"  {f}" for f in changed[:10]]
+
+            secs = r.metadata.get("duration_seconds")
+            if secs:
+                lines.append(f"\n— {model} · {secs}s")
+
+            return "\n".join(lines)
+
+        # ── model switching ───────────────────────────────────────────────────
+        if intent in {"set_coding_model", "show_coding_model"} and r.metadata.get("coding_models"):
+            active = r.metadata.get("active_coding_model", "local")
+            return f"{r.summary}\n\nActive coding model: {active}"
+
+        # ── generic / conversational ──────────────────────────────────────────
         lines = [r.summary]
         if r.metadata.get("name") and intent not in {"chat", "project_details"}:
             lines.append(f"Project: {r.metadata['name']}")
@@ -336,9 +370,6 @@ class NativeShellController:
             lines.append(f"Location: {r.metadata['root_path']}")
         if r.status == "needs_approval":
             lines += ["", "Approval required before I continue."]
-        if intent in {"set_coding_model", "show_coding_model"} and r.metadata.get("coding_models"):
-            lines.append("")
-            lines.append(f"Active coding model: {r.metadata.get('active_coding_model', 'local')}")
         return "\n".join(lines)
 
     def _display_title(self, r: SamResult) -> str:

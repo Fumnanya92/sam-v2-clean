@@ -363,44 +363,66 @@ def _run_git(root: Path, command: Iterable[str]) -> str:
 
 
 def _coding_answer_summary(lines: list[str]) -> str:
-    """Return Codex/Claude's answer text, preserving its wording and lines."""
-    answer = _extract_answer_block(lines)
-    if answer:
-        return answer
-    return ""
+    """Return the agent's answer, preserving its wording.
 
+    Strategy (in order of preference):
+    1. Explicit "Answer:" / "Final answer:" block — take the last one found.
+    2. Last contiguous run of meaningful prose lines (agents summarise at the end).
+    3. All meaningful non-noise lines joined.
+    4. Last resort: last 8 raw cleaned lines — never return empty when the
+       agent produced any output at all.
+    """
+    if not lines:
+        return ""
 
-def _extract_answer_block(lines: list[str]) -> str:
-    cleaned = [_strip_terminal_line(line) for line in lines]
-    answer_starts = [
-        index
-        for index, line in enumerate(cleaned)
-        if line.lower().startswith(("answer:", "final answer:"))
+    cleaned = [_strip_terminal_line(ln) for ln in lines]
+
+    # ── 1. Explicit answer block (last occurrence wins) ───────────────────────
+    for i in range(len(cleaned) - 1, -1, -1):
+        ln = cleaned[i]
+        if ln.lower().startswith(("answer:", "final answer:")):
+            block: list[str] = []
+            for part in cleaned[i:]:
+                p = part.strip()
+                if not p:
+                    if block:
+                        break
+                    continue
+                block.append(p)
+            text = "\n".join(block).strip()
+            if text:
+                for prefix in ("final answer:", "answer:"):
+                    if text.lower().startswith(prefix):
+                        text = text[len(prefix):].lstrip(" :-")
+                        break
+                if text:
+                    return text
+
+    # ── 2. Last run of meaningful prose (agents summarise at the end) ─────────
+    meaningful_idx = [
+        i for i, ln in enumerate(cleaned)
+        if ln and not _is_status_line(ln) and not _looks_like_tool_noise(ln)
     ]
-    fallback_starts = [
-        index
-        for index, line in enumerate(cleaned)
-        if (
-            line
-            and not line.lower().startswith("result:")
-            and not _is_status_line(line)
-            and not _looks_like_tool_noise(line)
-        )
-    ]
-    starts = answer_starts or fallback_starts
-    ordered_starts = list(reversed(starts)) if answer_starts else starts
-    for start in ordered_starts:
-        block: list[str] = []
-        for line in cleaned[start:]:
-            if not line:
-                continue
-            if _is_status_line(line) or _looks_like_tool_noise(line):
-                continue
-            block.append(line)
-        text = "\n".join(block).strip()
-        if text and not _is_status_line(text):
-            return text
-    return ""
+    if meaningful_idx:
+        runs: list[list[int]] = []
+        cur: list[int] = [meaningful_idx[0]]
+        for idx in meaningful_idx[1:]:
+            if idx - cur[-1] <= 3:
+                cur.append(idx)
+            else:
+                runs.append(cur)
+                cur = [idx]
+        runs.append(cur)
+
+        for run in reversed(runs):
+            if len(run) >= 2:
+                return "\n".join(cleaned[i] for i in run)
+
+        return "\n".join(cleaned[i] for i in meaningful_idx[-12:])
+
+    # ── 3. Last resort: last non-empty raw lines ──────────────────────────────
+    non_empty = [ln for ln in cleaned if ln]
+    return "\n".join(non_empty[-8:]) if non_empty else ""
 
 
 def _strip_terminal_line(line: str) -> str:
