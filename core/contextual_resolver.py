@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from workflows import should_route_discovery
+from core.context_validator import validate_request_context
 
 
 class ContextualRequestResolver:
@@ -108,6 +109,7 @@ class ContextualRequestResolver:
             last_runtime_intent=last_runtime_intent,
             last_runtime_summary=last_runtime_summary,
             pending_scaffold=pending_scaffold,
+            daily_state=daily_state,
         ):
             return request
 
@@ -231,6 +233,7 @@ class ContextualRequestResolver:
         last_runtime_intent: str,
         last_runtime_summary: str,
         pending_scaffold: dict[str, Any],
+        daily_state: dict[str, Any] | None = None,
     ) -> bool:
         lowered = text.lower().strip()
         if not lowered:
@@ -272,6 +275,29 @@ class ContextualRequestResolver:
         request.source = request.source or "context"
 
         if merged["name"] and merged["project_type"]:
+            # Validate context before scaffolding
+            # Only proceed if LLM determined this is truly a scaffold_project intent
+            last_project_root = ""
+            if daily_state and isinstance(daily_state, dict):
+                last_project_root = str(daily_state.get("last_project_root_path", {}).get("value", "") or daily_state.get("last_project_root_path", "")).strip()
+            
+            # Pass the intent so validator knows LLM already decided this is project creation
+            context_check = validate_request_context(
+                text,
+                active_project_path=last_project_root if last_project_root else None,
+                workspace_root=None,
+                existing_projects=None,
+                detected_intent="scaffold_project",  # Only called when scaffold intent is present
+            )
+            
+            if context_check.requires_confirmation:
+                # Need user confirmation before creating project
+                request.intent = "clarify"
+                request.parameters = {"pending_scaffold": merged}
+                request.needs_clarification = True
+                request.clarification_question = context_check.confirmation_question
+                return True
+            
             request.intent = "scaffold_project"
             request.parameters = {"name": merged["name"], "project_type": merged["project_type"]}
             request.needs_clarification = False
