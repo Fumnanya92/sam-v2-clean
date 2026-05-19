@@ -386,7 +386,7 @@ def _coding_answer_summary(lines: list[str]) -> str:
                 p = part.strip()
                 if not p:
                     if block:
-                        break
+                        break   # blank line ends the block
                     continue
                 block.append(p)
             text = "\n".join(block).strip()
@@ -404,6 +404,7 @@ def _coding_answer_summary(lines: list[str]) -> str:
         if ln and not _is_status_line(ln) and not _looks_like_tool_noise(ln)
     ]
     if meaningful_idx:
+        # Group into contiguous runs (gap ≤ 3 allows a few interspersed noise lines)
         runs: list[list[int]] = []
         cur: list[int] = [meaningful_idx[0]]
         for idx in meaningful_idx[1:]:
@@ -414,10 +415,12 @@ def _coding_answer_summary(lines: list[str]) -> str:
                 cur = [idx]
         runs.append(cur)
 
+        # Last run with ≥ 2 lines is the closing summary paragraph
         for run in reversed(runs):
             if len(run) >= 2:
                 return "\n".join(cleaned[i] for i in run)
 
+        # Only single-line runs — join all meaningful lines (capped)
         return "\n".join(cleaned[i] for i in meaningful_idx[-12:])
 
     # ── 3. Last resort: last non-empty raw lines ──────────────────────────────
