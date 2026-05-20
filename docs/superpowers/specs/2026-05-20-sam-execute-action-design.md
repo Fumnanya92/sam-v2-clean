@@ -178,11 +178,29 @@ Fallback: `describe_image_locally()` from ScreenCaptureAI (size/colour/brightnes
 
 ---
 
+## Desktop Control Model
+
+Sam is permitted to operate the desktop freely — open browsers, click buttons, move the mouse, type, and interact with any visible UI element. This is not limited to keyboard shortcuts. The interaction model is:
+
+```
+Screenshot → Ollama vision (what do I see?) → pyautogui (click / type / scroll) → Screenshot again (did it work?)
+```
+
+**Tools:**
+- `pyautogui` — mouse movement, clicks, keyboard input, scrolling
+- `mss` — fast screenshots between actions
+- `Ollama vision` — interpret screenshots to find UI elements and verify actions
+
+**For music pause/resume specifically:** Sam takes a screenshot, asks Ollama where the pause/play button is (pixel coordinates or region), then clicks it with pyautogui. He does not blindly send keyboard shortcuts — he sees the screen and acts on what he finds.
+
+**For any desktop task:** Sam follows the same see → decide → act → verify loop. If the action didn't produce the expected visual change, he tries once more before reporting failure.
+
+---
+
 ## Out of Scope
 
-- No Selenium/WebDriver automation (subprocess + Chrome URL is sufficient for YouTube Music)
+- No Selenium/WebDriver (direct desktop control via pyautogui is preferred)
 - No cross-machine or remote execution
-- No Windows audio API control (pause/resume is done via pyautogui keyboard shortcut `space` on the Chrome window)
 - No OpenAI vision (Ollama only, as decided)
 - No user-facing skill editor UI
 
@@ -191,7 +209,7 @@ Fallback: `describe_image_locally()` from ScreenCaptureAI (size/colour/brightnes
 ## Success Criteria
 
 1. `"open YouTube Music"` → Chrome opens at music.youtube.com, no "which project?" prompt
-2. `"pause the music"` → sends space keypress to Chrome window via pyautogui
+2. `"pause the music"` → takes screenshot, Ollama locates the pause button, pyautogui clicks it
 3. `"play lofi"` on day 2 → Sam finds the skill, runs it without writing a new script
 4. `"play something"` after 3 sessions → Sam picks the most-played liked track
 5. `"what can you see?"` → Sam captures screen and returns an Ollama vision description
