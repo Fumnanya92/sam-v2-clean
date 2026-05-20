@@ -1310,8 +1310,8 @@ class ConversationArea(QWidget):
                 item.widget().deleteLater()
 
     def _scroll_end(self) -> None:
-        QTimer.singleShot(0, lambda: self._on_range_changed(
-            0, self._scroll.verticalScrollBar().maximum()
+        QTimer.singleShot(0, lambda: self._scroll.verticalScrollBar().setValue(
+            self._scroll.verticalScrollBar().maximum()
         ))
 
     def _on_range_changed(self, _min: int, _max: int) -> None:
