@@ -18,8 +18,8 @@ from PyQt6.QtCore import (
     QSize, Qt, QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QColor, QFont, QFontMetrics, QLinearGradient,
-    QPainter, QPen, QRadialGradient,
+    QColor, QFont, QFontMetrics, QKeySequence, QLinearGradient,
+    QPainter, QPen, QRadialGradient, QShortcut, QTextOption,
 )
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -1319,6 +1319,45 @@ class ConversationArea(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  GROWING INPUT  — auto-expanding QTextEdit (1–5 lines)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _GrowingInput(QTextEdit):
+    submitted = pyqtSignal()
+
+    _MIN_H = 40
+    _MAX_H = 40 * 5
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setFixedHeight(self._MIN_H)
+        self.document().contentsChanged.connect(self._on_contents_changed)
+
+    def sizeHint(self) -> QSize:
+        doc_h = int(self.document().size().height()) + 16
+        h = max(self._MIN_H, min(doc_h, self._MAX_H))
+        return QSize(super().sizeHint().width(), h)
+
+    def keyPressEvent(self, e) -> None:
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                super().keyPressEvent(e)
+            else:
+                self.submitted.emit()
+                e.accept()
+                return
+        super().keyPressEvent(e)
+
+    def _on_contents_changed(self) -> None:
+        hint_h = self.sizeHint().height()
+        if self.height() != hint_h:
+            self.setFixedHeight(hint_h)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  COMPOSER
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1356,15 +1395,14 @@ class Composer(QWidget):
         bl.setContentsMargins(14, 12, 14, 10)
         bl.setSpacing(0)
 
-        self._field = QLineEdit()
+        self._field = _GrowingInput()
         self._field.setPlaceholderText("Tell Sam what to do…")
         self._field.setFont(_f_ui(14))
-        self._field.setFixedHeight(28)
         self._field.setStyleSheet(
-            f"QLineEdit {{ background: transparent; border: none; color: {_INK}; }}"
-            f"QLineEdit::placeholder {{ color: {_INK_FAINT}; }}"
+            f"QTextEdit {{ background: transparent; border: none; color: {_INK}; }}"
+            f"QTextEdit QScrollBar:vertical {{ width: 0px; }}"
         )
-        self._field.returnPressed.connect(self._submit)
+        self._field.submitted.connect(self._submit)
         bl.addWidget(self._field)
 
         # footer
@@ -1418,7 +1456,7 @@ class Composer(QWidget):
         outer.addWidget(wrap)
 
     def _submit(self) -> None:
-        t = self._field.text().strip()
+        t = self._field.toPlainText().strip()
         if t and not self._busy:
             self.submitted.emit(t)
             self._field.clear()
@@ -1428,6 +1466,13 @@ class Composer(QWidget):
         self._field.setPlaceholderText(
             "Sam is working — your next message will queue" if busy else "Tell Sam what to do…"
         )
+
+    def set_text(self, text: str) -> None:
+        self._field.setPlainText(text)
+        self._field.setFocus()
+        cursor = self._field.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._field.setTextCursor(cursor)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
