@@ -446,3 +446,76 @@ def session_context_summary(memory_path: Path | None) -> str:
             lines.append(f"  [{t['date']}] {t['project']}: {t['task']}")
 
     return "\n".join(lines) if lines else "(nothing saved yet)"
+
+
+# ---------------------------------------------------------------------------
+# Music preferences & playlist
+# ---------------------------------------------------------------------------
+
+def get_music_prefs(memory_path: Path | None) -> dict:
+    """Return the full music_preferences block. Creates empty structure if missing."""
+    data = _load(memory_path)
+    return data.get("music_preferences", {"playlist": [], "liked": [], "disliked": []})
+
+
+def save_music_pref(title: str, skill_slug: str, memory_path: Path | None) -> None:
+    """
+    Record that a track was played. Increments play_count if already exists.
+    Noop if title is empty.
+    """
+    if not title:
+        return
+    data = _load(memory_path)
+    prefs = data.setdefault("music_preferences", {"playlist": [], "liked": [], "disliked": []})
+    playlist: list[dict] = prefs.setdefault("playlist", [])
+
+    for entry in playlist:
+        if entry.get("title", "").lower() == title.lower():
+            entry["play_count"] = int(entry.get("play_count", 0)) + 1
+            entry["last_played"] = _now()
+            entry["skill"] = skill_slug
+            _save(data, memory_path)
+            return
+
+    playlist.append({
+        "title": title,
+        "skill": skill_slug,
+        "play_count": 1,
+        "last_played": _now(),
+        "liked": False,
+    })
+    _save(data, memory_path)
+
+
+def mark_music_liked(title: str, memory_path: Path | None) -> None:
+    """
+    Mark a track as liked. Updates the playlist entry and the liked list.
+    Idempotent — calling twice has no extra effect.
+    """
+    if not title:
+        return
+    data = _load(memory_path)
+    prefs = data.setdefault("music_preferences", {"playlist": [], "liked": [], "disliked": []})
+
+    for entry in prefs.get("playlist", []):
+        if entry.get("title", "").lower() == title.lower():
+            entry["liked"] = True
+            break
+
+    liked: list[str] = prefs.setdefault("liked", [])
+    if title not in liked:
+        liked.append(title)
+
+    _save(data, memory_path)
+
+
+def get_liked_music(memory_path: Path | None) -> list[dict]:
+    """Return liked playlist entries sorted by play_count descending."""
+    prefs = get_music_prefs(memory_path)
+    liked_titles = {t.lower() for t in prefs.get("liked", [])}
+    liked = [
+        p for p in prefs.get("playlist", [])
+        if p.get("title", "").lower() in liked_titles
+    ]
+    liked.sort(key=lambda p: int(p.get("play_count", 0)), reverse=True)
+    return liked

@@ -1,0 +1,34 @@
+{
+  "screenshot": {
+    "slug": "screenshot",
+    "description": "Take a screenshot of the current screen and save to Desktop",
+    "domain": "system",
+    "tags": [
+      "screenshot",
+      "screen",
+      "capture",
+      "see",
+      "vision"
+    ],
+    "file": "system/screenshot.py",
+    "run_count": 0,
+    "last_run": "",
+    "status": "active"
+  },
+  "open_the_youtube_music_website_in_chrome": {
+    "slug": "open_the_youtube_music_website_in_chrome",
+    "description": "Open the YouTube Music website in Chrome.",
+    "domain": "browser",
+    "tags": [
+      "open",
+      "youtube",
+      "music",
+      "website",
+      "chrome"
+    ],
+    "file": "browser/open_the_youtube_music_website_in_chrome.py",
+    "run_count": 1,
+    "last_run": "2026-05-20",
+    "status": "active"
+  }
+}

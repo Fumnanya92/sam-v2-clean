@@ -32,7 +32,10 @@ Actions Sam can take:
   find     - search this Windows machine for a file, folder, or project
   open     - open a folder or file in Windows Explorer
   code     - write, fix, edit, or review code in a project (via coding agent)
-  run      - execute a command, run tests, or start an app
+  run      - execute a command, run tests, or start an app within a project
+  execute  - run a one-shot desktop task RIGHT NOW with no project context needed:
+             open a URL, play/pause/resume media, take a screenshot, describe the screen,
+             control the desktop with mouse/keyboard, install a package
   remember - save new information, a path, or a credential to memory
   query    - read live data from a database (Firestore, SQL, etc.)
   skill    - run an acquired skill script (use skill_name field to specify which one)
@@ -52,6 +55,14 @@ Examples (message -> action):
   "fix the login bug"                           -> code
   "build me a web scraper"                      -> code  (new tool)
   "run the tests"                               -> run
+  "open YouTube Music in Chrome"                -> execute
+  "play some lofi music"                        -> execute
+  "pause the music"                             -> execute
+  "resume the music"                            -> execute
+  "take a screenshot"                           -> execute
+  "what can you see on my screen?"              -> execute
+  "open chrome and go to github.com"            -> execute
+  "install pyautogui"                           -> execute
   "test my flutter app"                         -> skill  (skill_name: test_flutter_ui)
   "run UI tests on focusflow"                   -> skill  (skill_name: test_flutter_ui)
   "test the estate app"                         -> skill  (skill_name: test_flutter_ui)
@@ -77,7 +88,7 @@ User message: "{message}"
 Output ONLY this JSON:
 {{
   "intent": "what the user actually wants, in plain English",
-  "action": "chat|find|open|code|run|remember|query|skill",
+  "action": "chat|find|open|code|run|execute|remember|query|skill",
   "project_hint": "project or app name if mentioned, else empty string",
   "goal": "the specific task or question",
   "skill_name": "acquired skill name if action=skill, else empty string",
@@ -87,6 +98,8 @@ Output ONLY this JSON:
 Rules:
 - "Can you X?" with a specific named target = directive to do X. Route to that action.
 - "Can you X?" with no specific target = capability question = chat.
+- execute = for immediate desktop actions on THIS machine, no project codebase needed.
+- run/code = for actions on a software project codebase.
 - is_confirming_pending: true ONLY if a pending task exists AND user is agreeing (yes, go ahead, sure, ok, do it, proceed).
 - Use open only for opening folders/files in Explorer.
 - Use remember ONLY when user is STORING new info. Recall = chat.
@@ -138,6 +151,10 @@ class SamBrain:
 
         # Track the action _think() chose — used by the auditor in _record_and_return
         self._last_thought_action: str = "chat"
+
+        # Pending music like — set after a play, checked on the next message
+        self._pending_music_like: dict | None = None
+        self._last_music_title: str = ""
 
         # Clear any stale pending task from a previous session so it doesn't leak in
         if self.memory_path:
@@ -325,6 +342,9 @@ class SamBrain:
             elif action == "open":
                 return self._record_and_return(self._handle_open(project_hint or goal))
 
+            elif action == "execute":
+                return self._record_and_return(self._handle_execute(goal))
+
             elif action in ("code", "run"):
                 return self._record_and_return(self._handle_code_smart(goal, project_hint))
 
@@ -369,11 +389,26 @@ class SamBrain:
             return response
 
     def _record_and_return(self, response: str) -> str:
-        """Record Sam's response to history, audit quality, and return it."""
+        """Record Sam's response to history, check pending music like, audit quality."""
         print(f"[SAM] {response[:120]}{'…' if len(response) > 120 else ''}", flush=True)
         self._history.append({"role": "assistant", "content": response})
 
-        # Post-response quality audit + passive learning (both silent)
+        # ── Music like detection — LLM judges, not keywords ──────────────────
+        if self._pending_music_like:
+            pending = self._pending_music_like
+            self._pending_music_like = None
+            recent_user = next(
+                (t["content"] for t in reversed(self._history[:-1]) if t["role"] == "user"),
+                "",
+            )
+            try:
+                if not self._llm_judge_music_change(pending["title"], recent_user):
+                    from sam_brain.memory import mark_music_liked
+                    mark_music_liked(pending["title"], self.memory_path)
+            except Exception:
+                pass
+
+        # ── Post-response quality audit + passive learning ────────────────────
         try:
             user_msg = next(
                 (t["content"] for t in reversed(self._history[:-1]) if t["role"] == "user"),
@@ -484,7 +519,7 @@ class SamBrain:
             if start != -1 and end > start:
                 parsed = _j.loads(raw[start:end])
                 # Validate action field
-                valid_actions = {"chat", "find", "open", "code", "run", "remember", "query", "skill"}
+                valid_actions = {"chat", "find", "open", "code", "run", "execute", "remember", "query", "skill"}
                 if parsed.get("action") not in valid_actions:
                     parsed["action"] = "chat"
                 return parsed
@@ -676,6 +711,152 @@ class SamBrain:
             f"I couldn't find a folder matching \"{hint}\" to open. "
             f"Can you give me the exact path?"
         )
+
+    def _handle_execute(self, goal: str) -> str:
+        """
+        Execute a one-shot desktop task immediately.
+        The LLM classifies the goal — no hardcoded keyword routing here.
+        Order: classify → check skills → reuse/patch/write → auto-fix → save.
+        """
+        from sam_brain.executor import (
+            _classify_execute_goal,
+            check_skills,
+            run_skill_script,
+            patch_skill,
+            llm_write_script,
+            run_and_learn,
+            desktop_act,
+            increment_run_count,
+            _describe_with_ocr,
+            _capture_screen,
+        )
+        from sam_brain.memory import save_music_pref, get_liked_music
+        from workers.names import resolve_worker_identity
+        import tempfile
+
+        worker = resolve_worker_identity("execute")
+        _worker_print(worker.name, f"Execute: {goal[:60]}")
+
+        # ── Classify the goal (LLM decides everything) ────────────────────────
+        classification = _classify_execute_goal(goal, self.llm)
+        task_type = classification["task_type"]
+        music_title = classification.get("music_title", "")
+        is_unprompted_play = classification.get("is_unprompted_play", False)
+
+        # ── Unprompted play: use liked playlist ───────────────────────────────
+        if task_type == "music_play" and is_unprompted_play:
+            liked = get_liked_music(self.memory_path)
+            if liked:
+                top = liked[0]
+                skill_match = check_skills(top["title"], self.llm)
+                if skill_match and not skill_match.needs_patch:
+                    ok, output = run_skill_script(skill_match.file_path)
+                    if ok:
+                        increment_run_count(skill_match.slug)
+                        save_music_pref(top["title"], skill_match.slug, self.memory_path)
+                        self._last_music_title = top["title"]
+                        self._pending_music_like = {"title": top["title"], "skill": skill_match.slug}
+                        return f"Playing {top['title']} — your most played."
+
+        # ── Vision: screenshot + OCR describe ────────────────────────────────
+        if task_type == "vision":
+            tmp = Path(tempfile.gettempdir()) / "sam_screen.png"
+            _capture_screen(tmp)
+            description = _describe_with_ocr(tmp)
+            return f"Here's what I can see:\n\n{description}"
+
+        # ── Desktop act: vision loop for click/press tasks ────────────────────
+        if task_type == "act":
+            ok, msg = desktop_act(goal, self.llm)
+            if ok:
+                if music_title:
+                    save_music_pref(music_title, "", self.memory_path)
+                return msg
+            # Fall through to script approach if act failed
+
+        # ── Check skills library ──────────────────────────────────────────────
+        match = check_skills(goal, self.llm)
+
+        if match and not match.needs_patch:
+            ok, output = run_skill_script(match.file_path)
+            if ok:
+                increment_run_count(match.slug)
+                if task_type == "music_play":
+                    from sam_brain.executor import _ensure_media_playing
+                    _ensure_media_playing()
+                    if music_title:
+                        save_music_pref(music_title, match.slug, self.memory_path)
+                        self._last_music_title = music_title
+                        self._pending_music_like = {"title": music_title, "skill": match.slug}
+                return f"Done. {output[:200]}" if output else "Done."
+            _worker_print(worker.name, f"Skill {match.slug} failed, writing fresh script")
+
+        if match and match.needs_patch:
+            try:
+                base_code = match.file_path.read_text(encoding="utf-8")
+                patched = patch_skill(base_code, goal, self.llm)
+                ok, output = run_and_learn(patched, goal, self.llm)
+                if ok:
+                    if task_type == "music_play" and music_title:
+                        new_match = check_skills(goal, self.llm)
+                        save_music_pref(music_title, new_match.slug if new_match else "", self.memory_path)
+                        self._last_music_title = music_title
+                        self._pending_music_like = {"title": music_title, "skill": ""}
+                    return f"Done. {output[:200]}" if output else "Done."
+            except Exception:
+                pass
+
+        # ── No match: write fresh script via LLM ──────────────────────────────
+        _worker_print(worker.name, "Writing script...")
+        script = llm_write_script(goal, self.llm)
+        if not script:
+            return "I couldn't figure out how to do that. Can you give me more detail?"
+
+        ok, output = run_and_learn(script, goal, self.llm)
+        if ok:
+            if task_type == "music_play" and music_title:
+                new_match = check_skills(goal, self.llm)
+                save_music_pref(music_title, new_match.slug if new_match else "", self.memory_path)
+                self._last_music_title = music_title
+                self._pending_music_like = {"title": music_title, "skill": ""}
+            return f"Done. {output[:200]}" if output else "Done."
+
+        return f"I tried but something went wrong: {output[:300]}"
+
+    def _llm_judge_music_change(self, title: str, user_message: str) -> bool:
+        """
+        Ask the LLM whether the user's message indicates they want to change or stop the music.
+        Returns True if they want to change/stop, False if they're happy with it.
+        Safe default on LLM failure: False (don't mark as liked if unsure).
+        """
+        if not title or not user_message:
+            return False
+        prompt = (
+            f'Sam just played music: "{title}"\n'
+            f'User\'s next message: "{user_message}"\n\n'
+            'Did the user want to change or stop the music? '
+            'Reply with only "yes" or "no".'
+        )
+        try:
+            import json as _j
+            from urllib import request as _req
+            payload = _j.dumps({
+                "model": self.llm.resolve_model(),
+                "prompt": prompt,
+                "stream": False,
+            }).encode()
+            req = _req.Request(
+                f"{self.llm.settings.base_url}/api/generate",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with _req.urlopen(req, timeout=10) as resp:
+                body = _j.loads(resp.read())
+                answer = str(body.get("response", "")).strip().lower()
+                return answer.startswith("yes")
+        except Exception:
+            return False
 
     def _handle_learn_skill(self, message: str) -> str:
         """
