@@ -519,3 +519,44 @@ def get_liked_music(memory_path: Path | None) -> list[dict]:
     ]
     liked.sort(key=lambda p: int(p.get("play_count", 0)), reverse=True)
     return liked
+
+
+# ---------------------------------------------------------------------------
+# Behavior notes — what Sam has learned about how to act (from corrections)
+# ---------------------------------------------------------------------------
+
+def save_behavior_note(note: str, memory_path: Path | None) -> None:
+    """
+    Save a behavioral rule Sam learned from a user correction.
+    Deduplicates by keeping only the latest note for each rough topic.
+    """
+    if not note or not note.strip():
+        return
+    data = _load(memory_path)
+    notes: list[dict] = data.setdefault("behavior_notes", [])
+
+    note = note.strip()
+    note_lower = note.lower()
+
+    # Deduplicate: if a note with >40% word overlap exists, replace it
+    note_words = set(note_lower.split())
+    for i, existing in enumerate(notes):
+        existing_words = set(existing.get("note", "").lower().split())
+        overlap = len(note_words & existing_words) / max(len(note_words), 1)
+        if overlap > 0.4:
+            notes[i] = {"note": note, "saved_at": _now()}
+            _save(data, memory_path)
+            return
+
+    notes.append({"note": note, "saved_at": _now()})
+    # Keep the most recent 20 behavioral notes
+    if len(notes) > 20:
+        data["behavior_notes"] = notes[-20:]
+    _save(data, memory_path)
+
+
+def get_behavior_notes(memory_path: Path | None) -> list[str]:
+    """Return all saved behavioral notes, newest first."""
+    data = _load(memory_path)
+    notes = data.get("behavior_notes", [])
+    return [n["note"] for n in reversed(notes)]

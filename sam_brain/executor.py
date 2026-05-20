@@ -14,6 +14,20 @@ No keyword matching. The LLM decides everything about intent, domain, and skill 
 """
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Sam's physical capabilities — single source of truth.
+# Injected into the brain prompt so Sam always knows what he can do.
+# When you add a new tool/ability, add it here.
+# ---------------------------------------------------------------------------
+SAM_CAPABILITIES = """Sam's physical tools (always available, no project needed):
+  - Vision:      screenshot + OCR — Sam can READ any text visible on screen with pixel coordinates
+  - Desktop act: multi-step See→Decide→Act loop — Sam clicks, types, presses keys guided by OCR
+  - Media keys:  Windows system media keys (playpause, nexttrack, prevtrack, volumemute)
+  - Browser:     open any URL in Chrome via subprocess
+  - pyautogui:   mouse click/move, keyboard press, type text — full desktop control
+  - mss:         fast screen capture
+  - Skills lib:  reusable saved scripts Sam writes and learns from past tasks"""
+
 import json
 import re
 import subprocess
@@ -334,8 +348,10 @@ def _classify_execute_goal(goal: str, llm_client) -> dict:
         'task_type meanings:\n'
         '  vision       = take screenshot / describe screen / what can you see\n'
         '  act          = click or press a button using vision to locate it\n'
-        '  music_play   = open and play music (specific track, genre, or general)\n'
-        '  script       = any other desktop action (open URL, install package, etc.)\n'
+        '  music_play   = open and play music (specific track, artist, genre, or general)\n'
+        '  script       = any other desktop action (open URL, install package, pause/resume media, etc.)\n\n'
+        'IMPORTANT: pause, resume, stop, mute, volume up/down = task_type "script" (NOT "act").\n'
+        '  These use pyautogui.press("space") or media keys — no clicking needed.\n\n'
         'is_unprompted_play = true ONLY when the user said something like "play music" or '
         '"play something" with no specific track, artist, or genre mentioned\n'
         'Output ONLY the JSON. No explanation.'
@@ -365,10 +381,25 @@ def _classify_execute_goal(goal: str, llm_client) -> dict:
     }
 
 
-def llm_write_script(goal: str, llm_client) -> str:
+def llm_write_script(goal: str, llm_client, memory_path=None) -> str:
     """Ask Ollama to write a standalone Python script for goal. Returns Python source."""
+    # Load behavioral notes Sam has learned from past corrections
+    behavior_section = ""
+    try:
+        from sam_brain.memory import get_behavior_notes
+        notes = get_behavior_notes(memory_path)
+        if notes:
+            behavior_section = (
+                "\nRules Sam has learned from past experience:\n"
+                + "\n".join(f"- {n}" for n in notes[:8])
+                + "\n"
+            )
+    except Exception:
+        pass
+
     prompt = (
         f"Write a standalone Python 3 script for Windows that does this:\n\n{goal}\n\n"
+        f"{behavior_section}"
         "Rules:\n"
         "- Must be fully self-contained (handle its own imports)\n"
         "- Must work on Windows 10\n"
@@ -378,17 +409,20 @@ def llm_write_script(goal: str, llm_client) -> str:
         "- Print a short confirmation message when done\n"
         "- Handle errors with try/except and print what went wrong\n"
         "- No user input — run silently and complete\n\n"
-        "IMPORTANT rules for music tasks:\n"
+        "IMPORTANT rules for media control (pause, resume, play, skip, mute):\n"
+        "- Use Windows system media keys via pyautogui — they work regardless of what is on screen\n"
+        "- pause/resume/play toggle: pyautogui.press('playpause')\n"
+        "- next track:               pyautogui.press('nexttrack')\n"
+        "- previous track:           pyautogui.press('prevtrack')\n"
+        "- mute/unmute:              pyautogui.press('volumemute')\n"
+        "- Do NOT take a screenshot, do NOT click anything for media control\n\n"
+        "IMPORTANT rules for opening music (open + play tasks):\n"
         "- NEVER open a search results page — open a DIRECT playable URL\n"
-        "- For YouTube Music lofi: use https://music.youtube.com/watch?v=jfKfPfyJRdk\n"
-        "- For YouTube Music jazz: use https://music.youtube.com/watch?v=Dx5qFachd3A\n"
-        "- For YouTube Music general: use https://music.youtube.com (home page auto-resumes)\n"
-        "- After opening Chrome, do: import time; time.sleep(4)\n"
-        "- Then use pyautogui.press('space') to start/resume playback\n"
-        "- This ensures music actually plays, not just the page opens\n\n"
-        "IMPORTANT rules for pause/resume:\n"
-        "- Use pyautogui.press('space') — the universal media play/pause key\n"
-        "- Do NOT try to click anything — just press space\n\n"
+        "- For YouTube Music lofi: https://music.youtube.com/watch?v=jfKfPfyJRdk\n"
+        "- For YouTube Music jazz: https://music.youtube.com/watch?v=Dx5qFachd3A\n"
+        "- For YouTube Music general: https://music.youtube.com\n"
+        "- Launch Chrome: subprocess.run(['cmd', '/c', 'start', 'chrome', 'URL'])\n"
+        "- After launch, sleep 4 seconds then pyautogui.press('playpause') to start\n\n"
         "Output ONLY the Python script, no explanation."
     )
     try:
@@ -441,12 +475,12 @@ def increment_run_count(slug: str, skills_root: Path | None = None) -> None:
 
 
 def _ensure_media_playing() -> None:
-    """Press space after a short delay to ensure media playback has started."""
+    """Press the Windows playpause media key after a short delay to start playback."""
     import time as _time
     _time.sleep(4)
     try:
         import pyautogui
-        pyautogui.press("space")
+        pyautogui.press("playpause")
     except Exception:
         pass
 
@@ -583,73 +617,129 @@ def _pyautogui_press(key: str) -> None:
     pyautogui.press(key)
 
 
-def desktop_act(instruction: str, llm_client) -> tuple[bool, str]:
+def _pyautogui_type(text: str) -> None:
+    """Type a string of text. Extracted for monkeypatching."""
+    import pyautogui
+    pyautogui.write(text, interval=0.05)
+
+
+_DESKTOP_ACT_PROMPT = """\
+Goal: {goal}
+
+Actions taken so far:
+{history}
+
+Text currently visible on screen (text → pixel coordinates):
+{screen_text}
+
+What is the SINGLE NEXT action to take toward the goal?
+
+Reply ONLY with JSON — one of:
+  {{"action": "click",  "x": 123, "y": 456, "reason": "what you are clicking"}}
+  {{"action": "type",   "text": "hello",    "reason": "what you are typing"}}
+  {{"action": "key",    "key": "enter",     "reason": "why you are pressing this key"}}
+  {{"action": "wait",   "seconds": 2,       "reason": "what you are waiting for"}}
+  {{"action": "done",                       "reason": "task is complete"}}
+
+Rules:
+- Use OCR coordinates exactly — click the x,y of the text you want to interact with
+- If the target text is not visible yet, use "wait" (app may still be loading)
+- Only use "done" when the goal has been fully achieved
+- No explanation outside the JSON"""
+
+
+def desktop_act(instruction: str, llm_client, max_steps: int = 10) -> tuple[bool, str]:
     """
-    See -> Decide -> Act loop using OCR + text LLM (no vision model needed).
-    1. Take a screenshot
-    2. OCR it to get all visible text with coordinates
-    3. Ask the text LLM: given these elements, what should I click/press?
-    4. Execute via pyautogui
-    5. Take a verification screenshot, OCR it, return what changed
-    Returns (success, message).
+    Multi-step See -> Decide -> Act loop using OCR + pyautogui.
+
+    Each step:
+      1. Screenshot the screen
+      2. OCR: extract all visible text with pixel coordinates
+      3. Ask LLM: given what's on screen + history, what's the next action?
+      4. Execute via pyautogui (click / type / key / wait)
+      5. Repeat until LLM says "done" or max_steps reached
+
+    This lets Sam do multi-step UI tasks: open an app, find a contact,
+    click it, type a message, press send — all driven by what he sees.
     """
+    import time as _time
+
     tmp_dir = Path(tempfile.gettempdir())
-    before = tmp_dir / "sam_before.png"
-    after = tmp_dir / "sam_after.png"
+    actions_taken: list[str] = []
 
-    _capture_screen(before)
-    elements = _ocr_screen(before)
+    for step in range(max_steps):
+        screenshot = tmp_dir / f"sam_act_{step}.png"
+        _capture_screen(screenshot)
+        elements = _ocr_screen(screenshot)
 
-    if not elements:
-        # No text found — fall back to pressing space (safe default for media)
-        try:
-            _pyautogui_press("space")
-            return True, "Pressed space (no text elements found on screen)"
-        except Exception as exc:
-            return False, f"Could not act on screen: {exc}"
+        if not elements:
+            _time.sleep(1.5)
+            continue
 
-    # Build a text summary of what's on screen for the LLM
-    screen_text = "\n".join(
-        f'  "{e["text"]}" at ({e["x"]}, {e["y"]})'
-        for e in elements[:25]
-    )
-
-    prompt = (
-        f'I need to: {instruction}\n\n'
-        f'Text visible on screen with pixel coordinates:\n{screen_text}\n\n'
-        'What single action should I take? Reply ONLY with JSON:\n'
-        '  {"action": "click", "x": 123, "y": 456}  -- click this pixel position\n'
-        '  {"action": "key", "key": "space"}          -- press this keyboard key\n'
-        'No explanation. Just the JSON.'
-    )
-
-    try:
-        body = _ollama_generate(
-            f"{llm_client.settings.base_url}/api/generate",
-            {"model": llm_client.resolve_model(), "prompt": prompt, "stream": False},
+        screen_text = "\n".join(
+            f'  "{e["text"]}" at ({e["x"]}, {e["y"]})'
+            for e in elements[:35]
         )
-        raw = str(body.get("response", "")).strip()
-        m = re.search(r"\{[^}]+\}", raw)
-        if not m:
-            return False, f"Could not parse action: {raw[:100]}"
-        action_data = json.loads(m.group(0))
-    except Exception as exc:
-        return False, f"LLM call failed: {exc}"
+        history = (
+            "\n".join(f"  {i+1}. {a}" for i, a in enumerate(actions_taken))
+            if actions_taken else "  (no actions yet)"
+        )
 
-    try:
-        if action_data.get("action") == "click":
-            x, y = int(action_data["x"]), int(action_data["y"])
-            _pyautogui_click(x, y)
-            msg = f"Clicked ({x}, {y})"
-        elif action_data.get("action") == "key":
-            key = str(action_data["key"])
-            _pyautogui_press(key)
-            msg = f"Pressed '{key}'"
-        else:
-            return False, f"Unknown action: {action_data}"
-    except Exception as exc:
-        return False, f"pyautogui failed: {exc}"
+        prompt = _DESKTOP_ACT_PROMPT.format(
+            goal=instruction,
+            history=history,
+            screen_text=screen_text,
+        )
 
-    _capture_screen(after)
-    verify = _describe_with_ocr(after)
-    return True, f"{msg}. Screen now: {verify[:200]}"
+        try:
+            body = _ollama_generate(
+                f"{llm_client.settings.base_url}/api/generate",
+                {"model": llm_client.resolve_model(), "prompt": prompt, "stream": False},
+            )
+            raw = str(body.get("response", "")).strip()
+            m = re.search(r"\{[^}]+\}", raw, re.DOTALL)
+            if not m:
+                continue
+            act = json.loads(m.group(0))
+        except Exception:
+            continue
+
+        action = act.get("action", "")
+        reason = act.get("reason", "")
+
+        if action == "done":
+            summary = "; ".join(actions_taken) if actions_taken else "Task complete"
+            return True, summary
+
+        try:
+            if action == "click":
+                x, y = int(act["x"]), int(act["y"])
+                _pyautogui_click(x, y)
+                actions_taken.append(f"Clicked ({x},{y}) — {reason}")
+                _time.sleep(0.6)
+
+            elif action == "type":
+                text = str(act.get("text", ""))
+                _pyautogui_type(text)
+                actions_taken.append(f"Typed '{text}' — {reason}")
+                _time.sleep(0.4)
+
+            elif action == "key":
+                key = str(act.get("key", ""))
+                _pyautogui_press(key)
+                actions_taken.append(f"Pressed '{key}' — {reason}")
+                _time.sleep(0.4)
+
+            elif action == "wait":
+                secs = float(act.get("seconds", 1.5))
+                _time.sleep(min(secs, 5))
+                actions_taken.append(f"Waited {secs}s — {reason}")
+
+            else:
+                actions_taken.append(f"Unknown action '{action}' — skipped")
+
+        except Exception as exc:
+            actions_taken.append(f"Action '{action}' failed: {exc}")
+
+    summary = "; ".join(actions_taken) if actions_taken else "No actions taken"
+    return True, f"Reached step limit. {summary}"

@@ -30,5 +30,21 @@
     "run_count": 1,
     "last_run": "2026-05-20",
     "status": "active"
+  },
+  "play_chike_s_music_on_youtube_music": {
+    "slug": "play_chike_s_music_on_youtube_music",
+    "description": "Play Chike's music on YouTube Music",
+    "domain": "music",
+    "tags": [
+      "play",
+      "chike",
+      "music",
+      "youtube",
+      "music"
+    ],
+    "file": "music/play_chike_s_music_on_youtube_music.py",
+    "run_count": 0,
+    "last_run": "",
+    "status": "active"
   }
 }

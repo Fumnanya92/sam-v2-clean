@@ -226,4 +226,71 @@ def save_learnings(
     if saved:
         print(f"[LEARN] Saved {len(saved)} fact(s) from this turn.", flush=True)
 
+    # ── Behavioral correction detector ────────────────────────────────────────
+    if llm_client:
+        correction = _extract_correction(user_msg, llm_client)
+        if correction:
+            from sam_brain.memory import save_behavior_note
+            save_behavior_note(correction, memory_path)
+            print(f"[LEARN] Saved behavioral note: {correction}", flush=True)
+            saved.append(correction)
+
     return saved
+
+
+# ---------------------------------------------------------------------------
+# Correction/teaching extractor — captures how the user wants Sam to behave
+# ---------------------------------------------------------------------------
+
+_CORRECTION_EXTRACT_PROMPT = """\
+A user is talking to their AI assistant Sam. Decide if this message is teaching Sam HOW to do something — a correction, instruction, or preference about Sam's behavior.
+
+User said: "{message}"
+
+If yes, extract the rule as a short, concrete statement Sam should follow (max 30 words).
+Focus on: how to do a task, which tool to use, what NOT to do, approach preferences.
+
+Examples of corrections worth saving:
+- "don't use space, use playpause" → "Use pyautogui.press('playpause') for media control, not space"
+- "use playwright not pyautogui for browser tasks" → "Use playwright for browser interaction, not pyautogui"
+- "never open a search page when playing music, open a direct URL" → "Open a direct playable URL for music, never a search results page"
+
+If the message is NOT a correction (it's a task request, greeting, question about code, etc.), output null.
+
+Output ONLY JSON: {{"rule": "..."}} or null"""
+
+
+def _extract_correction(message: str, llm_client: Any) -> str | None:
+    """Use LLM to detect if the user is correcting Sam's behavior and extract the rule."""
+    if len(message.strip()) < 15:
+        return None
+    try:
+        import json
+        from urllib import request as _req
+
+        prompt = _CORRECTION_EXTRACT_PROMPT.format(message=message[:400])
+        payload = json.dumps({
+            "model": llm_client.resolve_model(),
+            "prompt": prompt,
+            "stream": False,
+        }).encode()
+        req = _req.Request(
+            f"{llm_client.settings.base_url}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _req.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read())
+        raw = str(body.get("response", "")).strip()
+        if raw.lower() == "null" or not raw or raw.lower().startswith("null"):
+            return None
+        m = re.search(r'\{[^}]+\}', raw, re.DOTALL)
+        if m:
+            data = json.loads(m.group(0))
+            rule = str(data.get("rule", "")).strip()
+            if rule and len(rule) > 10:
+                return rule
+    except Exception:
+        pass
+    return None

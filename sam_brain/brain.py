@@ -25,6 +25,8 @@ Sam lives at: {sam_root}
 Sam's key folders: sam_brain/ (reasoning), llm/ (language model), tools/ (utilities), workspace/ (built projects), native_ui/ (desktop UI)
 Sam's memory file: {memory_path}
 
+{capabilities_section}
+
 {skills_section}
 
 Actions Sam can take:
@@ -33,9 +35,7 @@ Actions Sam can take:
   open     - open a folder or file in Windows Explorer
   code     - write, fix, edit, or review code in a project (via coding agent)
   run      - execute a command, run tests, or start an app within a project
-  execute  - run a one-shot desktop task RIGHT NOW with no project context needed:
-             open a URL, play/pause/resume media, take a screenshot, describe the screen,
-             control the desktop with mouse/keyboard, install a package
+  execute  - use any of Sam's physical tools listed above RIGHT NOW (no project codebase needed)
   remember - save new information, a path, or a credential to memory
   query    - read live data from a database (Firestore, SQL, etc.)
   skill    - run an acquired skill script (use skill_name field to specify which one)
@@ -98,7 +98,9 @@ Output ONLY this JSON:
 Rules:
 - "Can you X?" with a specific named target = directive to do X. Route to that action.
 - "Can you X?" with no specific target = capability question = chat.
-- execute = for immediate desktop actions on THIS machine, no project codebase needed.
+- execute = any use of Sam's physical tools (vision, media keys, browser, mouse/keyboard).
+  Any question about the screen or what Sam can see = execute (it uses the vision tool).
+  Any request to pause/play/skip media = execute (it uses Windows media keys).
 - run/code = for actions on a software project codebase.
 - is_confirming_pending: true ONLY if a pending task exists AND user is agreeing (yes, go ahead, sure, ok, do it, proceed).
 - Use open only for opening folders/files in Explorer.
@@ -485,9 +487,16 @@ class SamBrain:
         sam_root = str(Path(__file__).parent.parent)
         mem_display = str(self.memory_path) if self.memory_path else "(not set)"
 
+        try:
+            from sam_brain.executor import SAM_CAPABILITIES
+            capabilities_section = SAM_CAPABILITIES
+        except Exception:
+            capabilities_section = ""
+
         prompt = _THINK_PROMPT.format(
             sam_root=sam_root,
             memory_path=mem_display,
+            capabilities_section=capabilities_section,
             skills_section=skills_section,
             history=history_lines,
             known_projects=known_projects,
@@ -808,7 +817,7 @@ class SamBrain:
 
         # ── No match: write fresh script via LLM ──────────────────────────────
         _worker_print(worker.name, "Writing script...")
-        script = llm_write_script(goal, self.llm)
+        script = llm_write_script(goal, self.llm, memory_path=self.memory_path)
         if not script:
             return "I couldn't figure out how to do that. Can you give me more detail?"
 
