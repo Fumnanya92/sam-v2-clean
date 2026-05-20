@@ -216,7 +216,7 @@ class ThinkingDots(QWidget):
             p.drawEllipse(QRectF(x - 2.5, y - 2.5, 5, 5))
         # "thinking…" label
         p.setPen(QColor(_INK_MUTED))
-        f = _f_serif(14); p.setFont(f)
+        f = _f_ui(13); p.setFont(f)
         p.drawText(QRectF(50, 0, 100, self.height()), Qt.AlignmentFlag.AlignVCenter, "thinking…")
 
 
@@ -505,22 +505,8 @@ class Sidebar(QFrame):
         foot = QWidget()
         foot.setStyleSheet("background: transparent;")
         fl = QVBoxLayout(foot)
-        fl.setContentsMargins(16, 12, 16, 4)
-        fl.setSpacing(4)
-        for label, value in [("project", "sam-v2"), ("root", "~/code/sam-v2")]:
-            row = QHBoxLayout()
-            ll = QLabel(label)
-            ll.setFont(_f_ui(11))
-            ll.setStyleSheet(
-                f"color: {_INK_FAINT}; letter-spacing: 0.04em; background: transparent;"
-            )
-            row.addWidget(ll)
-            row.addStretch()
-            vl = QLabel(value)
-            vl.setFont(_f_mono(10) if label == "root" else _f_ui(11))
-            vl.setStyleSheet(f"color: {_INK_MUTED}; background: transparent;")
-            row.addWidget(vl)
-            fl.addLayout(row)
+        fl.setContentsMargins(16, 8, 16, 4)
+        fl.setSpacing(0)
         root.addWidget(foot)
 
     def add_group(self, group_name: str, items: list[dict]) -> None:
@@ -850,13 +836,13 @@ class ApprovalCard(QFrame):
         if self._status == "pending":
             self.setStyleSheet(
                 f"QFrame {{ background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-                f" stop:0 rgba(233,121,74,41), stop:0.8 {_S1});"
-                f" border: 1px solid rgba(233,121,74,107);"
+                f" stop:0 rgba(233,121,74,28), stop:0.8 {_S1});"
+                f" border: none;"
                 f" border-radius: 11px; }}"
             )
         else:
             self.setStyleSheet(
-                f"QFrame {{ background: {_S1}; border: 1px solid {_BSTRONG};"
+                f"QFrame {{ background: {_S1}; border: none;"
                 f" border-radius: 11px; }}"
             )
 
@@ -958,7 +944,7 @@ class SamTurn(QWidget):
         # "Sam  11:44" header
         meta_row = QHBoxLayout(); meta_row.setSpacing(8)
         sam_lbl = QLabel("Sam")
-        sam_lbl.setFont(_f_serif(17))
+        sam_lbl.setFont(_f_ui(14, QFont.Weight.DemiBold))
         sam_lbl.setStyleSheet(f"color: {_INK}; background: transparent;")
         meta_row.addWidget(sam_lbl)
         time_lbl = QLabel(at)
@@ -1018,7 +1004,7 @@ class ThinkingTurn(QWidget):
 
         meta_row = QHBoxLayout(); meta_row.setSpacing(8)
         sam_lbl = QLabel("Sam")
-        sam_lbl.setFont(_f_serif(16))
+        sam_lbl.setFont(_f_ui(14, QFont.Weight.DemiBold))
         sam_lbl.setStyleSheet(f"color: {_INK}; background: transparent;")
         meta_row.addWidget(sam_lbl)
         t = QLabel("now")
@@ -1029,6 +1015,151 @@ class ThinkingTurn(QWidget):
         lay.addLayout(meta_row)
 
         lay.addWidget(ThinkingDots())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LIVE ACTIVITY CARD  — streams worker steps, collapses to trace when done
+# ══════════════════════════════════════════════════════════════════════════════
+
+class LiveActivityCard(QFrame):
+    """
+    Shows Sam's internal steps streaming in real time.
+
+    While working: pulsing header + live rows.
+    When finish() is called: collapses to an InlineTrace-style toggle.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rows: list[tuple[str, str]] = []   # (worker, message)
+        self._finished = False
+        self._open = False
+
+        self.setStyleSheet(
+            f"QFrame {{ background: {_S1}; border: 1px solid {_BSOFT};"
+            f" border-radius: 10px; }}"
+        )
+
+        self._root = QVBoxLayout(self)
+        self._root.setContentsMargins(0, 0, 0, 0)
+        self._root.setSpacing(0)
+
+        # ── header ────────────────────────────────────────────────────────────
+        self._hdr = QFrame()
+        self._hdr.setStyleSheet(
+            f"QFrame {{ background: {_S2}; border: none;"
+            f" border-top-left-radius: 10px; border-top-right-radius: 10px; }}"
+        )
+        hl = QHBoxLayout(self._hdr)
+        hl.setContentsMargins(14, 10, 14, 10)
+        hl.setSpacing(10)
+
+        self._dots = ThinkingDots()
+        self._dots.setFixedWidth(120)
+        hl.addWidget(self._dots)
+        hl.addStretch()
+
+        self._hdr_toggle = QPushButton()
+        self._hdr_toggle.setFont(_f_ui(12))
+        self._hdr_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hdr_toggle.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {_INK_MUTED};"
+            f" border: none; padding: 2px 6px; }}"
+            f"QPushButton:hover {{ color: {_INK}; }}"
+        )
+        self._hdr_toggle.hide()
+        self._hdr_toggle.clicked.connect(self._toggle)
+        hl.addWidget(self._hdr_toggle)
+
+        self._root.addWidget(self._hdr)
+
+        # ── body — list of step rows ──────────────────────────────────────────
+        self._body = QWidget()
+        self._body.setStyleSheet("background: transparent;")
+        self._body_lay = QVBoxLayout(self._body)
+        self._body_lay.setContentsMargins(0, 4, 0, 6)
+        self._body_lay.setSpacing(0)
+        self._root.addWidget(self._body)
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def add_line(self, worker: str, message: str) -> None:
+        """Add one streaming step row."""
+        if self._finished:
+            return
+        self._rows.append((worker, message))
+        self._add_row(worker, message, live=True)
+
+    def finish(self) -> None:
+        """Collapse to a toggle. Called when Sam's response arrives."""
+        if self._finished:
+            return
+        self._finished = True
+        n = len(self._rows)
+        if n == 0:
+            self.hide()
+            return
+
+        # Replace the dots header with a static collapsed toggle
+        self._dots.hide()
+        chevron = "▸"
+        self._hdr_toggle.setText(
+            f"{chevron}  show what I did  ·  {n} step{'s' if n != 1 else ''}"
+        )
+        self._hdr_toggle.show()
+        self._hdr.setStyleSheet(
+            f"QFrame {{ background: transparent; border: none;"
+            f" border-top-left-radius: 10px; border-top-right-radius: 10px; }}"
+        )
+        self.setStyleSheet(
+            f"QFrame {{ background: transparent; border: none; border-radius: 10px; }}"
+        )
+
+        # Rebuild body rows as finished style (no live indicator)
+        while self._body_lay.count():
+            item = self._body_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for w, m in self._rows:
+            self._add_row(w, m, live=False)
+
+        # Start collapsed
+        self._body.hide()
+
+    # ── private ───────────────────────────────────────────────────────────────
+
+    def _toggle(self) -> None:
+        self._open = not self._open
+        self._body.setVisible(self._open)
+        n = len(self._rows)
+        chevron = "▾" if self._open else "▸"
+        self._hdr_toggle.setText(
+            f"{chevron}  show what I did  ·  {n} step{'s' if n != 1 else ''}"
+        )
+
+    def _add_row(self, worker: str, message: str, *, live: bool) -> None:
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(16, 3, 16, 3)
+        rl.setSpacing(14)
+
+        wl = QLabel(worker.upper()[:10])
+        wl.setFont(_f_mono(10))
+        wl.setFixedWidth(72)
+        color = _ACCENT if live else _INK_MUTED
+        wl.setStyleSheet(
+            f"color: {color}; letter-spacing: 0.07em; background: transparent;"
+        )
+        rl.addWidget(wl)
+
+        ml = QLabel(message)
+        ml.setFont(_f_ui(12))
+        ml.setStyleSheet(f"color: {_INK_SOFT}; background: transparent;")
+        ml.setWordWrap(True)
+        rl.addWidget(ml, 1)
+
+        self._body_lay.addWidget(row)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1151,6 +1282,18 @@ class ConversationArea(QWidget):
             self._thinking_widget = ThinkingTurn()
             self._content_lay.addWidget(self._thinking_widget)
             self._scroll_end()
+
+    def start_live_activity(self) -> LiveActivityCard:
+        """Replace thinking dots with a live activity card. Returns the card."""
+        self._remove_thinking()
+        card = LiveActivityCard()
+        self._content_lay.addWidget(card)
+        self._scroll_end()
+        return card
+
+    def finish_live_activity(self, card: LiveActivityCard) -> None:
+        """Collapse the live card. The widget stays in the layout as a trace."""
+        card.finish()
 
     def _remove_thinking(self) -> None:
         if self._thinking_widget is not None:
@@ -1337,9 +1480,6 @@ class SamWindow(QWidget):
         self._conv.approved.connect(self.approved)
         self._conv.declined.connect(self.declined)
         self._conv.path_clicked.connect(self.path_clicked)
-
-        # demo: approval → think → test-pass result
-        self.approved.connect(self._demo_after_approval)
         ws.addWidget(self._conv, 1)
 
         self._composer = Composer()
@@ -1406,6 +1546,14 @@ class SamWindow(QWidget):
 
     def set_input_busy(self, busy: bool) -> None:
         self._composer.set_busy(busy)
+
+    def set_live_status(self, line: str) -> None:
+        """Update the window title with a live status line while Sam is working."""
+        if line:
+            short = (line[:60] + "…") if len(line) > 60 else line
+            self.setWindowTitle(f"Sam — {short}")
+        else:
+            self.setWindowTitle("Sam")
 
     def append_chat_message(self, speaker: str, text: str) -> None:
         if speaker.lower() == "sam":

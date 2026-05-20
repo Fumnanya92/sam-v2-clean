@@ -678,7 +678,16 @@ def _inferred_roots(configured_roots: list[Path]) -> list[Path]:
         roots.extend([root, root.parent, root.parent.parent])
 
     cwd = Path.cwd()
-    roots.extend([cwd, cwd.parent, cwd.parent.parent, Path.home() / "Desktop", Path.home() / "Documents"])
+    desktop = Path.home() / "Desktop"
+    roots.extend([cwd, cwd.parent, cwd.parent.parent, desktop, Path.home() / "Documents"])
+
+    # Include one level of Desktop subdirectories so projects nested under e.g. Desktop/Darey are found
+    try:
+        for child in desktop.iterdir():
+            if child.is_dir() and not child.name.startswith("."):
+                roots.append(child)
+    except OSError:
+        pass
 
     unique: list[Path] = []
     seen: set[str] = set()

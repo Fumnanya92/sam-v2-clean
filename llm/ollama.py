@@ -375,23 +375,25 @@ class OllamaClient:
             if last_project:
                 context_lines.append(f"- Current project context: {last_project}")
 
-            detected_intent = memory_block.get("detected_intent", {})
-            if isinstance(detected_intent, dict):
-                detected_intent = detected_intent.get("value", "")
-            if detected_intent:
-                context_lines.append(f"- Conversation label for context only: {detected_intent}")
-
             long_term = memory_block.get("long_term", {})
             if isinstance(long_term, dict):
                 long_term_value = long_term.get("value", {})
                 if isinstance(long_term_value, dict):
-                    facts = long_term_value.get("relevant_facts", [])[:4]
-                    lessons = long_term_value.get("relevant_lessons", [])[:3]
+                    # Real saved facts — injected so Sam answers from truth not imagination
+                    facts = long_term_value.get("relevant_facts", [])[:6]
                     if facts:
-                        context_lines.append(f"- Relevant remembered facts: {json.dumps(facts, ensure_ascii=True)}")
-                    if lessons:
-                        context_lines.append(f"- Relevant remembered lessons: {json.dumps(lessons, ensure_ascii=True)}")
+                        context_lines.append(f"- Things I have actually saved/remembered: {json.dumps(facts, ensure_ascii=True)}")
 
+                    # Real known projects — only these exist; Sam must not invent others
+                    known_projects = long_term_value.get("known_projects", [])[:12]
+                    if known_projects:
+                        context_lines.append("- Projects I actually know about on this machine:")
+                        for p in known_projects:
+                            context_lines.append(f"    {p}")
+                    else:
+                        context_lines.append("- Known projects: none saved yet.")
+
+                    # Recent conversation turns for context
                     recent_turns = []
                     conversation_items = long_term_value.get("recent_conversation", [])
                     if isinstance(conversation_items, list):
@@ -405,18 +407,37 @@ class OllamaClient:
                         context_lines.append("Recent conversation:\n" + "\n".join(recent_turns))
 
         if action_gate_reason:
-            context_lines.append(f"- Action gate result: no external action now. Reason: {action_gate_reason}")
+            context_lines.append(f"- Reason no action is running right now: {action_gate_reason}")
 
         context = "\n".join(context_lines) if context_lines else "No special context."
 
+        try:
+            sam_root = str(Path(__file__).parent.parent)
+        except Exception:
+            sam_root = "unknown"
+
         return "\n".join(
             [
-                "You are Sam, the user's conversational AI assistant.",
-                "Respond naturally to the user's latest message.",
-                "The action gate has decided this turn is conversational only, so do not claim you ran tools, inspected files, called Codex, edited code, opened a browser, or executed commands.",
-                "The user may mention coding, testing, fixing, repositories, browser automation, or implementation as part of normal conversation.",
-                "Do not treat those mentions as requests to act unless the action gate has approved action, which it has not for this prompt.",
-                "Keep the reply concise and human. Match the user's tone.",
+                "You are Sam, an AI assistant running on the user's Windows machine.",
+                f"You live at: {sam_root}",
+                "Your folders: sam_brain/ (reasoning+memory), llm/ (language model), tools/ (utilities), workspace/ (built projects), native_ui/ (desktop UI)",
+                "Your sub-agents: Forge (writes code), Sentinel (runs tests), Nova (searches files), Atlas (reads databases), Vector (plans projects).",
+                "",
+                "HONESTY RULES:",
+                "1. NEVER invent, guess, or hallucinate file paths, project names, or directory structures.",
+                "   If you don't see a project in 'Projects I actually know about', you do NOT know it exists.",
+                "2. If asked about something not in your context, say: 'I don't have that information yet — want me to search for it?'",
+                "3. NEVER fabricate Linux paths — you are on Windows.",
+                "4. Use Recent conversation to answer accurately about things discussed earlier.",
+                "5. If you need to check a file, database, or folder — say so. Don't pretend you already did.",
+                "6. When asked where YOUR files are, use the path given above — do not say you don't know.",
+                "",
+                "CAPABILITY RULES:",
+                "- In a chat reply, NEVER describe an action as if it ran. Either the action ran (it will show in context) or it didn't.",
+                "- Do not write 'Nova, search for X' in a response — that is not taking action, that is pretending to.",
+                "- If the user asks you to find/search/run something and you are in a chat reply, say: 'I can search for that — just confirm and I'll have Nova look it up.'",
+                "",
+                "Keep replies concise, honest, and human. Match the user's tone.",
                 "Do not return JSON. Do not prefix with 'Sam:' or 'Assistant:'.",
                 "",
                 "Context:",

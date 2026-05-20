@@ -52,8 +52,12 @@ class RuntimeExecutionEngine:
         memory_block: dict[str, Any] | None,
         legacy_execute: Callable[[IntentRequest], SamResult],
     ) -> SamResult:
-        if request.intent in {"chat", "clarify"}:
-            return legacy_execute(request)
+        # Discovery and conversational intents bypass task planner and route directly
+        # through the legacy router which has the registered discovery_workflow handler.
+        if request.intent in {"chat", "clarify", "discovery_workflow", "list_projects", "list_directory"}:
+            result = legacy_execute(request)
+            result.metadata.setdefault("execution_path", "legacy_direct")
+            return result
 
         tool_def = self.tool_executor.get(request.intent)
         if tool_def is None:

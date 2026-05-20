@@ -15,6 +15,13 @@ from memory.long_term import ensure_schema as ensure_long_term_schema
 from .request_handler import RequestHandler
 from .session import RuntimeSession
 
+# New brain — the clean, block-by-block replacement for the routing layer
+try:
+    from sam_brain import SamBrain
+    _BRAIN_AVAILABLE = True
+except ImportError:
+    _BRAIN_AVAILABLE = False
+
 
 class SamRuntime:
     def __init__(
@@ -47,6 +54,12 @@ class SamRuntime:
             approval_manager=self.approval_manager,
         )
         self._started = False
+
+        # Block-by-block brain (replaces the old routing layer)
+        if _BRAIN_AVAILABLE:
+            self.brain: SamBrain | None = SamBrain(memory_path=self.memory_path)
+        else:
+            self.brain = None
 
     def start(self) -> SamResult:
         if self._started:
@@ -127,6 +140,17 @@ class SamRuntime:
             start_result = self.start()
             if not start_result.ok:
                 return start_result
+
+        # Use the new brain if available
+        if self.brain is not None:
+            response = self.brain.handle(user_text)
+            return SamResult(
+                status="success",
+                summary=response,
+                metadata={"brain": "sam_brain", "blocks": sorted(self.brain.active_blocks())},
+            )
+
+        # Fallback: old routing handler (kept intact as safety net)
         return self.handler.handle(user_text, self.session)
 
     def shutdown(self) -> SamResult:

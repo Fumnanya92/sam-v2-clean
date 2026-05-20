@@ -207,7 +207,7 @@ class TaskPlanner:
 
         request_obj = context_data.get("request")
         requested_intent = str(getattr(request_obj, "intent", context_data.get("intent", ""))).strip()
-        if requested_intent in {"chat", "clarify", "set_coding_model", "show_coding_model", "capabilities"}:
+        if requested_intent in {"chat", "clarify", "set_coding_model", "show_coding_model", "capabilities", "discovery_workflow", "list_projects", "list_directory"}:
             return {"delegate": False, "work_kind": "conversational", "reason": "local/control request"}
 
         if self.work_kind_classifier is None:

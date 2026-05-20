@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import shutil
 import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
+
 
 from config import load_config
 from core import SamRuntime
@@ -112,9 +114,17 @@ def _run_once(runtime: SamRuntime, text: str, *, json_output: bool) -> int:
     if json_output:
         print(json.dumps(_serialize_result(result), indent=2))
     else:
-        print(result.summary)
-        if result.metadata:
-            print(json.dumps(_serialize_value(result.metadata), indent=2))
+        summary = result.summary or ""
+        try:
+            print(summary)
+        except UnicodeEncodeError:
+            # Windows console may not handle all Unicode — fall back safely
+            safe = summary.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(
+                sys.stdout.encoding or "utf-8"
+            )
+            print(safe)
+        # Metadata stays hidden — Sam speaks, not dumps his internals
+        # (pass --json flag if you need the raw metadata for debugging)
     return 0 if result.ok else 2
 
 
@@ -131,9 +141,13 @@ def _run_repl(runtime: SamRuntime) -> int:
         if not user_text:
             continue
         result = runtime.handle_text(user_text)
-        print(result.summary)
-        if result.metadata:
-            print(json.dumps(_serialize_value(result.metadata), indent=2))
+        summary = result.summary or ""
+        try:
+            print(summary)
+        except UnicodeEncodeError:
+            print(summary.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(
+                sys.stdout.encoding or "utf-8"
+            ))
 
 
 def _run_daemon(*, db_path: Path, host: str, port: int) -> int:
