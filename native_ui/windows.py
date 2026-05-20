@@ -18,8 +18,8 @@ from PyQt6.QtCore import (
     QSize, Qt, QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QColor, QFont, QFontMetrics, QKeySequence, QLinearGradient,
-    QPainter, QPen, QRadialGradient, QShortcut, QTextOption,
+    QColor, QFont, QFontMetrics, QLinearGradient,
+    QPainter, QPen, QRadialGradient, QTextOption,
 )
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -1337,7 +1337,7 @@ class _GrowingInput(QTextEdit):
         self.document().contentsChanged.connect(self._on_contents_changed)
 
     def sizeHint(self) -> QSize:
-        doc_h = int(self.document().size().height()) + 16
+        doc_h = int(self.document().size().height()) + 16  # top+bottom content margins
         h = max(self._MIN_H, min(doc_h, self._MAX_H))
         return QSize(super().sizeHint().width(), h)
 
@@ -1401,6 +1401,7 @@ class Composer(QWidget):
         self._field.setStyleSheet(
             f"QTextEdit {{ background: transparent; border: none; color: {_INK}; }}"
             f"QTextEdit QScrollBar:vertical {{ width: 0px; }}"
+            f"QTextEdit::placeholder {{ color: {_INK_FAINT}; }}"
         )
         self._field.submitted.connect(self._submit)
         bl.addWidget(self._field)
