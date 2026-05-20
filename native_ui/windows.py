@@ -18,11 +18,11 @@ from PyQt6.QtCore import (
     QSize, Qt, QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QColor, QFont, QFontMetrics, QLinearGradient,
-    QPainter, QPen, QRadialGradient, QTextOption,
+    QColor, QFont, QFontMetrics, QKeySequence, QLinearGradient,
+    QPainter, QPen, QRadialGradient, QShortcut, QTextOption,
 )
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QScrollArea, QSizePolicy, QTextBrowser, QTextEdit,
     QVBoxLayout, QWidget,
 )
@@ -97,8 +97,13 @@ def _f_mono(size: int = 11) -> QFont:
 #  INLINE RENDERING  — backtick code spans + path links
 # ══════════════════════════════════════════════════════════════════════════════
 
-_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s<>'\"]+")
-_CODE_RE = re.compile(r"`([^`]+)`")
+_PATH_RE   = re.compile(r"[A-Za-z]:[\\/][^\s<>'\"]+")
+_CODE_RE   = re.compile(r"`([^`]+)`")
+_BOLD_RE   = re.compile(r'\*\*(.+?)\*\*', re.DOTALL)
+_ITALIC_RE = re.compile(r'\*(.+?)\*', re.DOTALL)
+_H2_RE     = re.compile(r'^## (.+)$', re.MULTILINE)
+_H1_RE     = re.compile(r'^# (?!#)(.+)$', re.MULTILINE)
+_BULLET_RE = re.compile(r'^[-*] (.+)$', re.MULTILINE)
 
 
 def _render_inline(text: str) -> str:
@@ -125,6 +130,48 @@ def _render_inline(text: str) -> str:
         parts.append(html.escape(text[last:]))
     body = "".join(parts).replace("\n\n", '<br><br>').replace("\n", " ")
     return f'<p style="margin:0; padding:0; line-height:1.68;">{body}</p>'
+
+
+def _render_markdown(text: str) -> str:
+    """Convert common markdown to HTML. HTML-escapes input before processing."""
+    s = html.escape(text)
+
+    # Headings — H2 before H1 so ## is not matched by the H1 pattern
+    s = _H2_RE.sub(
+        lambda m: (
+            f'<p style="margin:4px 0 2px 0; padding:0; font-size:14px;'
+            f' font-weight:600; color:{_INK_SOFT};">{m.group(1)}</p>'
+        ),
+        s,
+    )
+    s = _H1_RE.sub(
+        lambda m: (
+            f'<p style="margin:6px 0 2px 0; padding:0; font-size:16px;'
+            f' font-weight:700; color:{_INK};">{m.group(1)}</p>'
+        ),
+        s,
+    )
+    s = _BOLD_RE.sub(r'<b>\1</b>', s)
+    s = _ITALIC_RE.sub(r'<i>\1</i>', s)
+    s = _BULLET_RE.sub(
+        lambda m: (
+            f'<p style="margin:1px 0; padding:0; padding-left:14px;">'
+            f'<span style="color:{_ACCENT};">·</span> {m.group(1)}</p>'
+        ),
+        s,
+    )
+    # m.group(1) is already HTML-escaped — no double-escape
+    s = _CODE_RE.sub(
+        lambda m: (
+            f'<code style="font-family:JetBrains Mono,Consolas,monospace;'
+            f' font-size:11.5px; background:rgba(42,36,29,0.9);'
+            f' color:{_ACCENT_INK}; padding:1px 5px; border-radius:3px;">'
+            f'{m.group(1)}</code>'
+        ),
+        s,
+    )
+    s = s.replace('\n\n', '<br><br>').replace('\n', '<br>')
+    return f'<span style="line-height:1.68;">{s}</span>'
 
 
 def _linkify(text: str) -> str:
@@ -455,14 +502,14 @@ class Sidebar(QFrame):
         si.setFont(_f_ui(11))
         si.setStyleSheet(f"color: {_INK_MUTED}; background: transparent;")
         sl.addWidget(si)
-        sf = QLineEdit()
-        sf.setPlaceholderText("search conversations")
-        sf.setStyleSheet(
+        self._search_field = QLineEdit()
+        self._search_field.setPlaceholderText("search conversations")
+        self._search_field.setStyleSheet(
             f"QLineEdit {{ background: transparent; border: none; color: {_INK}; }}"
             f"QLineEdit::placeholder {{ color: {_INK_FAINT}; }}"
         )
-        sf.setFont(_f_ui(12))
-        sl.addWidget(sf, 1)
+        self._search_field.setFont(_f_ui(12))
+        sl.addWidget(self._search_field, 1)
         kbd = QLabel("⌘K")
         kbd.setFont(_f_mono(10))
         kbd.setStyleSheet(
@@ -935,8 +982,11 @@ class SamTurn(QWidget):
         trace: list[dict] | None = None,
         code_block: dict | None = None,
         approval: dict | None = None,
+        is_error: bool = False,
     ) -> None:
         super().__init__()
+        self._raw_text = text
+
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
@@ -945,7 +995,8 @@ class SamTurn(QWidget):
         meta_row = QHBoxLayout(); meta_row.setSpacing(8)
         sam_lbl = QLabel("Sam")
         sam_lbl.setFont(_f_ui(14, QFont.Weight.DemiBold))
-        sam_lbl.setStyleSheet(f"color: {_INK}; background: transparent;")
+        _sam_color = _BAD if is_error else _INK
+        sam_lbl.setStyleSheet(f"color: {_sam_color}; background: transparent;")
         meta_row.addWidget(sam_lbl)
         time_lbl = QLabel(at)
         time_lbl.setFont(_f_mono(10))
@@ -954,6 +1005,22 @@ class SamTurn(QWidget):
         )
         meta_row.addWidget(time_lbl)
         meta_row.addStretch()
+
+        # copy button — hidden until hover
+        self._copy_btn = QPushButton("⧉")
+        self._copy_btn.setFixedSize(22, 22)
+        self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._copy_btn.setFont(_f_mono(11))
+        self._copy_btn.setToolTip("Copy")
+        self._copy_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {_INK_GHOST};"
+            f" border: 1px solid transparent; border-radius: 4px; }}"
+            f"QPushButton:hover {{ color: {_INK_SOFT}; border-color: {_BSOFT}; }}"
+        )
+        self._copy_btn.setVisible(False)
+        self._copy_btn.clicked.connect(self._copy_text)
+        meta_row.addWidget(self._copy_btn)
+
         lay.addLayout(meta_row)
 
         # body text with inline code — QLabel RichText honours <p line-height>
@@ -964,11 +1031,15 @@ class SamTurn(QWidget):
             body.setTextFormat(Qt.TextFormat.RichText)
             body.setOpenExternalLinks(False)
             body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            body.setText(_render_inline(text))
-            body.setStyleSheet(
-                f"color: {_INK_SOFT}; background: transparent;"
-            )
+            body.setText(_render_markdown(text))
+            _body_color = _BAD if is_error else _INK_SOFT
+            body.setStyleSheet(f"color: {_body_color}; background: transparent;")
             lay.addWidget(body)
+
+        if is_error:
+            self.setStyleSheet(
+                f"border-left: 3px solid {_BAD}; padding-left: 10px;"
+            )
 
         # inline code diff
         if code_block:
@@ -989,6 +1060,21 @@ class SamTurn(QWidget):
             card.approved.connect(self.approved)
             card.declined.connect(self.declined)
             lay.addWidget(card)
+
+    def enterEvent(self, e) -> None:
+        self._copy_btn.setVisible(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:
+        self._copy_btn.setVisible(False)
+        super().leaveEvent(e)
+
+    def _copy_text(self) -> None:
+        if self._raw_text:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.clipboard().setText(self._raw_text)
+            self._copy_btn.setText("✓")
+            QTimer.singleShot(1500, lambda: self._copy_btn.setText("⧉"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1163,17 +1249,73 @@ class LiveActivityCard(QFrame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  EMPTY STATE  — starter prompts shown when conversation is empty
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _EmptyState(QWidget):
+    prompt_selected = pyqtSignal(str)
+
+    _PROMPTS = [
+        "Build a new project",
+        "Fix a bug in my code",
+        "Explain a file",
+        "Run my tests",
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 80, 0, 0)
+        lay.setSpacing(24)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+
+        heading = QLabel("What can Sam do?")
+        heading.setFont(_f_serif(22, italic=False))
+        heading.setStyleSheet(f"color: {_INK_MUTED}; background: transparent;")
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(heading)
+
+        chips_row = QWidget()
+        chips_row.setStyleSheet("background: transparent;")
+        cl = QHBoxLayout(chips_row)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(10)
+        cl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        for prompt in self._PROMPTS:
+            btn = QPushButton(prompt)
+            btn.setFont(_f_ui(13))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedSize(160, 64)
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {_S1}; color: {_INK_SOFT};"
+                f" border: 1px solid {_BSOFT}; border-radius: 9px; padding: 10px 12px;"
+                f" text-align: center; }}"
+                f"QPushButton:hover {{ background: {_S2}; border-color: {_BSTRONG};"
+                f" color: {_INK}; }}"
+            )
+            btn.clicked.connect(lambda _, p=prompt: self.prompt_selected.emit(p))
+            cl.addWidget(btn)
+
+        lay.addWidget(chips_row)
+        lay.addStretch()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  CONVERSATION AREA
 # ══════════════════════════════════════════════════════════════════════════════
 
 class ConversationArea(QWidget):
-    approved     = pyqtSignal()
-    declined     = pyqtSignal()
-    path_clicked = pyqtSignal(str)
+    approved       = pyqtSignal()
+    declined       = pyqtSignal()
+    path_clicked   = pyqtSignal(str)
+    prompt_selected = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self._thinking_widget: ThinkingTurn | None = None
+        self._empty_state: _EmptyState | None = None
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -1209,6 +1351,25 @@ class ConversationArea(QWidget):
         outer_lay = QVBoxLayout(self)
         outer_lay.setContentsMargins(0, 0, 0, 0)
         outer_lay.addWidget(self._scroll)
+
+        self._show_empty_state()
+
+    # ── empty state ───────────────────────────────────────────────────────────
+
+    def _show_empty_state(self) -> None:
+        if self._empty_state is None:
+            self._empty_state = _EmptyState()
+            self._content_lay.insertWidget(0, self._empty_state)
+
+    def _remove_empty_state(self) -> None:
+        if self._empty_state is not None:
+            self._content_lay.removeWidget(self._empty_state)
+            self._empty_state.deleteLater()
+            self._empty_state = None
+
+    def connect_empty_state(self, slot) -> None:
+        if self._empty_state is not None:
+            self._empty_state.prompt_selected.connect(slot)
 
     def set_thread_header(self, title: str, project: str, started: str) -> None:
         # remove old header if any
@@ -1252,6 +1413,7 @@ class ConversationArea(QWidget):
 
     def add_user_turn(self, text: str, at: str | None = None) -> None:
         self._remove_thinking()
+        self._remove_empty_state()
         turn = UserTurn(text, at or datetime.now().strftime("%H:%M"))
         self._content_lay.addWidget(turn)
         self._scroll_end()
@@ -1263,14 +1425,17 @@ class ConversationArea(QWidget):
         trace=None,
         code_block=None,
         approval=None,
+        is_error: bool = False,
     ) -> None:
         self._remove_thinking()
+        self._remove_empty_state()
         turn = SamTurn(
             text,
             at or datetime.now().strftime("%H:%M"),
             trace=trace,
             code_block=code_block,
             approval=approval,
+            is_error=is_error,
         )
         turn.approved.connect(self.approved)
         turn.declined.connect(self.declined)
@@ -1304,10 +1469,12 @@ class ConversationArea(QWidget):
 
     def clear(self) -> None:
         self._remove_thinking()
+        self._remove_empty_state()
         while self._content_lay.count():
             item = self._content_lay.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self._show_empty_state()
 
     def _scroll_end(self) -> None:
         QTimer.singleShot(0, lambda: self._scroll.verticalScrollBar().setValue(
@@ -1412,22 +1579,36 @@ class Composer(QWidget):
         foot.setSpacing(0)
 
         hints = QHBoxLayout(); hints.setSpacing(6)
-        for key, label in [("/", "commands"), ("@", "files")]:
-            chip = QWidget()
-            chip.setStyleSheet("background: transparent;")
-            cl = QHBoxLayout(chip); cl.setContentsMargins(3, 0, 3, 0); cl.setSpacing(5)
-            kl = QLabel(key)
-            kl.setFont(_f_mono(10))
-            kl.setStyleSheet(
-                f"color: {_INK_SOFT}; background: {_S3}; border: 1px solid {_BSOFT};"
-                f" border-radius: 3px; padding: 1px 5px;"
-            )
-            cl.addWidget(kl)
-            ll = QLabel(label)
-            ll.setFont(_f_ui(11))
-            ll.setStyleSheet(f"color: {_INK_FAINT}; background: transparent;")
-            cl.addWidget(ll)
-            hints.addWidget(chip)
+
+        # "/" chip — decorative
+        slash_chip = QWidget()
+        slash_chip.setStyleSheet("background: transparent;")
+        sc = QHBoxLayout(slash_chip); sc.setContentsMargins(3, 0, 3, 0); sc.setSpacing(5)
+        sk = QLabel("/")
+        sk.setFont(_f_mono(10))
+        sk.setStyleSheet(
+            f"color: {_INK_SOFT}; background: {_S3}; border: 1px solid {_BSOFT};"
+            f" border-radius: 3px; padding: 1px 5px;"
+        )
+        sc.addWidget(sk)
+        sl_lbl = QLabel("commands")
+        sl_lbl.setFont(_f_ui(11))
+        sl_lbl.setStyleSheet(f"color: {_INK_FAINT}; background: transparent;")
+        sc.addWidget(sl_lbl)
+        hints.addWidget(slash_chip)
+
+        # "@" chip — opens file picker
+        at_btn = QPushButton("@ files")
+        at_btn.setFont(_f_ui(11))
+        at_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        at_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {_INK_FAINT};"
+            f" border: 1px solid {_BSOFT}; border-radius: 4px; padding: 2px 8px; }}"
+            f"QPushButton:hover {{ color: {_INK_SOFT}; border-color: {_BORDER}; }}"
+        )
+        at_btn.clicked.connect(self._on_at_clicked)
+        hints.addWidget(at_btn)
+
         foot.addLayout(hints)
         foot.addStretch()
 
@@ -1470,6 +1651,20 @@ class Composer(QWidget):
 
     def set_text(self, text: str) -> None:
         self._field.setPlainText(text)
+        self._field.setFocus()
+        cursor = self._field.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._field.setTextCursor(cursor)
+
+    def _on_at_clicked(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Attach file")
+        if path:
+            self.insert_at_file(path)
+
+    def insert_at_file(self, path: str) -> None:
+        current = self._field.toPlainText()
+        sep = " " if current and not current.endswith(" ") else ""
+        self._field.setPlainText(current + sep + f"@{path} ")
         self._field.setFocus()
         cursor = self._field.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
@@ -1541,12 +1736,18 @@ class SamWindow(QWidget):
 
         root.addWidget(self._main, 1)
 
+        # wire empty-state prompt chips → composer
+        self._conv.connect_empty_state(self._composer.set_text)
+
         # set default thread header
         self._conv.set_thread_header("New conversation", self._project, self._started)
 
         # models list for cycling
         self._models = ["local", "claude", "codex"]
         self._model_idx = 0
+
+        # Ctrl+K → focus sidebar search
+        QShortcut(QKeySequence("Ctrl+K"), self).activated.connect(self._focus_search)
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -1584,9 +1785,10 @@ class SamWindow(QWidget):
         trace=None,
         code_block=None,
         approval=None,
+        is_error: bool = False,
     ) -> None:
         self._conv.add_sam_turn(
-            text, trace=trace, code_block=code_block, approval=approval
+            text, trace=trace, code_block=code_block, approval=approval, is_error=is_error
         )
 
     def show_thinking(self) -> None:
@@ -1724,6 +1926,12 @@ class SamWindow(QWidget):
         self._topbar.set_crumb(self._project, "")
         self._conv.clear()
         self._conv.set_thread_header("New conversation", self._project, self._started)
+        self._conv.connect_empty_state(self._composer.set_text)
+
+    def _focus_search(self) -> None:
+        if not self._sidebar_open:
+            self._toggle_sidebar()
+        self._sidebar._search_field.setFocus()
 
     def _cycle_model(self) -> None:
         self._model_idx = (self._model_idx + 1) % len(self._models)

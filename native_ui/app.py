@@ -155,7 +155,7 @@ class NativeShellController:
             plan = pending.get("plan", {})
             self._show_plan_approval(reply, plan)
         else:
-            self.window.add_sam_message(reply)
+            self.window.add_sam_message(reply, is_error=not result.ok)
 
         # Persist Sam's reply and save the thread
         self._record_message("sam", reply)
